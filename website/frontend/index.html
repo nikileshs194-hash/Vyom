@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GigPilot - Agentic Earnings Optimization</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<nav class="navbar">
+  <div class="nav-inner">
+    <span class="brand">GigPilot</span>
+    <span class="tagline">Agentic AI for gig-worker earnings</span>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="hero-inner">
+    <h1>Stop guessing where to drive next.</h1>
+    <p>GigPilot watches demand, traffic and incentives in real time and tells you exactly
+       where to go to hit today's earnings goal - and explains why.</p>
+    <button id="launchBtn" class="btn btn-primary">Launch GigPilot</button>
+  </div>
+</header>
+
+<main id="appSection" class="app-section hidden">
+
+  <section class="goal-panel card">
+    <h2>Today's Goal</h2>
+    <div class="goal-grid">
+      <label>Target earnings (Rs)
+        <input type="number" id="targetEarnings"
+               value="1000" min="100" max="5000" step="50" />
+      </label>
+      <label>Hours available
+        <input type="number" id="availableHours" value="5" min="1" max="12" step="0.5" />
+      </label>
+      <label>Vehicle
+        <select id="vehicle">
+          <option value="bike">bike</option>
+          <option value="scooter">scooter</option>
+          <option value="car">car</option>
+        </select>
+      </label>
+      <label>Time of day
+        <select id="hourBlock"></select>
+      </label>
+      <label>Earned so far (Rs)
+        <input type="number" id="earnedSoFar" value="620" min="0" max="5000" step="10" />
+      </label>
+      <label>Hours already worked
+        <input type="number" id="hoursElapsed" value="2.5" min="0" max="12" step="0.5" />
+      </label>
+    </div>
+    <button id="startBtn" class="btn btn-primary">Start / Update Goal</button>
+    <span id="statusBadge" class="badge badge-waiting">WAITING FOR GOAL</span>
+  </section>
+
+  <section id="dashboard" class="dashboard hidden">
+
+    <div class="metrics-row">
+      <div class="metric card"><div class="metric-label">Earned so far</div>
+        <div class="metric-value" id="mEarned">-</div></div>
+      <div class="metric card"><div class="metric-label">Time remaining</div>
+        <div class="metric-value" id="mTime">-</div></div>
+      <div class="metric card"><div class="metric-label">Current zone</div>
+        <div class="metric-value" id="mZone">-</div></div>
+      <div class="metric card"><div class="metric-label">Progress</div>
+        <div class="metric-value" id="mProgress">-</div></div>
+    </div>
+    <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+
+    <div class="two-col">
+      <div class="card">
+        <h2>GigPilot Recommendation</h2>
+        <h3 id="recAction">-</h3>
+        <p id="recReason">-</p>
+        <div class="confidence-bar"><div id="confFill" class="confidence-fill"></div>
+          <span id="confLabel"></span></div>
+        <div class="btn-row">
+          <button id="acceptBtn" class="btn btn-primary">Accept</button>
+          <button id="ignoreBtn" class="btn btn-secondary">Ignore</button>
+        </div>
+        <details class="trace">
+          <summary>Decision trace</summary>
+          <ul id="traceList"></ul>
+        </details>
+      </div>
+
+      <div class="card">
+        <h2>Live Replanning Demo</h2>
+        <p class="muted">Trigger a live condition change and watch GigPilot replan.</p>
+        <label>Target zone for event
+          <select id="eventZone"></select>
+        </label>
+        <div class="btn-col">
+          <button id="trafficBtn" class="btn btn-warning">Simulate traffic spike</button>
+          <button id="incentiveBtn" class="btn btn-success">
+            Simulate incentive activation</button>
+          <button id="resetBtn" class="btn btn-secondary">Reset all zone conditions</button>
+        </div>
+        <p id="lastEvent" class="event-banner hidden"></p>
+
+        <h3 class="sub">Zone comparison (expected Rs/hour)</h3>
+        <table class="data-table">
+          <thead><tr><th>Zone</th><th>Demand</th><th>Rs/hr (low-high)</th></tr></thead>
+          <tbody id="zoneCompareBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div class="card">
+        <h2>Recommendation history</h2>
+        <table class="data-table">
+          <thead><tr>
+            <th>Time</th><th>Action</th><th>Outcome</th><th>Confidence</th>
+          </tr></thead>
+          <tbody id="historyBody"></tbody>
+        </table>
+        <p id="noHistory" class="muted">No recommendations acted on yet.</p>
+      </div>
+
+      <div class="card">
+        <h2>Weekly summary</h2>
+        <p><strong>Best earning window:</strong> <span id="wBestWindow">-</span></p>
+        <p><strong>Best-performing zone:</strong> <span id="wBestZone">-</span></p>
+        <p><strong>Average net earning rate:</strong>
+           Rs <span id="wAvgRate">-</span>/hour</p>
+        <p class="muted" id="wNote"></p>
+      </div>
+    </div>
+
+  </section>
+</main>
+
+<footer class="footer">GigPilot - built for AI HACK X MRDU 2026</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

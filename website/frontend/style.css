@@ -1,0 +1,153 @@
+:root {
+  --navy: #0f2442;
+  --blue: #2563eb;
+  --green: #16a34a;
+  --amber: #d97706;
+  --bg: #f4f6fb;
+  --card: #ffffff;
+  --text: #1a2233;
+  --muted: #6b7280;
+  --border: #e3e7ef;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+.hidden { display: none !important; }
+
+.navbar {
+  background: var(--navy);
+  color: white;
+  padding: 14px 24px;
+}
+.nav-inner {
+  max-width: 1100px; margin: 0 auto;
+  display: flex; align-items: baseline; gap: 12px;
+}
+.brand { font-size: 22px; font-weight: 700; letter-spacing: 0.5px; }
+.tagline { font-size: 13px; color: #c7d2e8; }
+
+.hero {
+  background: linear-gradient(135deg, var(--navy), #1d3f6e);
+  color: white;
+  padding: 56px 24px;
+  text-align: center;
+}
+.hero-inner { max-width: 700px; margin: 0 auto; }
+.hero h1 { font-size: 32px; margin-bottom: 14px; }
+.hero p { font-size: 16px; color: #d9e2f3; margin-bottom: 26px; }
+
+.btn {
+  border: none;
+  border-radius: 8px;
+  padding: 10px 18px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-primary { background: var(--blue); color: white; }
+.btn-primary:hover { background: #1d4ed8; }
+.btn-secondary { background: #e5e9f2; color: var(--text); }
+.btn-secondary:hover { background: #d7dce8; }
+.btn-warning { background: var(--amber); color: white; }
+.btn-success { background: var(--green); color: white; }
+.btn-row { display: flex; gap: 10px; margin: 14px 0; }
+.btn-col { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+
+.app-section { max-width: 1100px; margin: 0 auto; padding: 32px 24px 60px; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 22px;
+  box-shadow: 0 1px 3px rgba(15, 36, 66, 0.06);
+  margin-bottom: 24px;
+}
+.card h2 { margin-top: 0; font-size: 18px; }
+.sub { font-size: 15px; margin-top: 18px; }
+
+.goal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin-bottom: 16px;
+}
+label {
+  display: flex; flex-direction: column;
+  font-size: 13px; color: var(--muted); gap: 4px;
+}
+input, select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.badge {
+  display: inline-block;
+  margin-left: 12px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.badge-waiting { background: #fde68a; color: #92400e; }
+.badge-monitoring { background: #bbf7d0; color: #166534; }
+
+.metrics-row {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 16px; margin-bottom: 10px;
+}
+.metric { text-align: center; padding: 16px; margin-bottom: 0; }
+.metric-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.metric-value { font-size: 20px; font-weight: 700; }
+
+.progress-bar {
+  background: #e5e9f2; border-radius: 8px; height: 10px;
+  margin: 6px 0 26px; overflow: hidden;
+}
+.progress-fill { background: var(--blue); height: 100%; width: 0%; transition: width 0.3s; }
+
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 800px) {
+  .two-col, .goal-grid, .metrics-row { grid-template-columns: 1fr; }
+}
+
+.confidence-bar {
+  background: #e5e9f2; border-radius: 8px; height: 22px;
+  position: relative; margin: 14px 0; overflow: hidden;
+}
+.confidence-fill {
+  background: var(--green); height: 100%; width: 0%;
+  transition: width 0.3s;
+}
+.confidence-bar span {
+  position: absolute; top: 0; left: 10px; line-height: 22px;
+  font-size: 12px; font-weight: 600; color: var(--navy);
+}
+
+.muted { color: var(--muted); font-size: 13px; }
+.event-banner {
+  background: #fef3c7; border: 1px solid #fde68a;
+  padding: 8px 12px; border-radius: 6px;
+  font-size: 13px; margin-top: 10px;
+}
+
+.data-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+.data-table th {
+  text-align: left; color: var(--muted); font-weight: 600;
+  padding: 6px 8px; border-bottom: 1px solid var(--border);
+}
+.data-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+
+.trace { margin-top: 14px; font-size: 13px; }
+.trace summary { cursor: pointer; font-weight: 600; color: var(--blue); }
+.trace ul { margin: 10px 0 0; padding-left: 18px; color: var(--text); }
+
+.footer { text-align: center; padding: 24px; color: var(--muted); font-size: 12px; }

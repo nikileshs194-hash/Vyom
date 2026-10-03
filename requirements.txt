@@ -1,0 +1,9 @@
+# Website (main submission)
+fastapi>=0.110
+uvicorn>=0.29
+# Backup Streamlit version
+streamlit>=1.50
+pandas>=2.0
+# Tests (python -m pytest)
+pytest>=8.0
+httpx>=0.27
