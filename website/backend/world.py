@@ -25,12 +25,15 @@ from data import (
     poisson,
     typical_traffic,
 )
+from partners import pick_partner
 
 VISIBLE_ORDERS_PER_MIN = 0.4  # orders offered to a rider per minute at demand 1.0
 INCENTIVE_CHANCE_PER_MIN = 0.0015
 SPIKE_MINUTES = 45
 RAIN_BURST_MINUTES = 60
 RAIN_BURST_MM = 6.0
+BUSY_PLACE_MINUTES = 240
+BUSY_PLACE_BOOST = 3.5  # demand multiplier in the zone of the active busy place
 WARM_UP_MINUTES = 12
 CITY_DRIVE_FACTOR = 1.15  # OSRM free-flow times are optimistic for city riding
 
@@ -42,7 +45,7 @@ def fuel_cost(distance_km, vehicle):
 class World:
     def __init__(self, weather, roads, traffic, now=None, seed=None, on_earning=None):
         self.weather, self.roads, self.live_traffic = weather, roads, traffic
-        self.on_earning = on_earning or (lambda rider, amount, zone_id, kind, note: None)
+        self.on_earning = on_earning or (lambda rider, amount, zone_id, kind, **details: None)
         self.rnd = random.Random(seed)
         # start a little early: the warm-up below advances to the requested time
         self.now = (now or datetime.now(IST)) - timedelta(minutes=WARM_UP_MINUTES)
@@ -57,6 +60,7 @@ class World:
             for z in ZONES
         }
         self.events = deque(maxlen=40)  # city-wide events
+        self.busy_place = None  # {"place": ..., "until": ...} while a surge is on
         self.riders = {}  # user_id -> rider
         self._order_seq = 0
         self.advance(WARM_UP_MINUTES, quiet=True)  # so zones start with open orders
@@ -85,6 +89,9 @@ class World:
         """History-based forecast, lifted by rain (people order in)."""
         when = when or self.now
         boost = 1 + min(0.35, 0.1 * self.rain(zone_id, when))
+        surge = self.busy_place
+        if surge and surge["place"]["zone_id"] == zone_id and when < surge["until"]:
+            boost *= BUSY_PLACE_BOOST
         return round(forecast_demand(zone_id, when) * boost, 2)
 
     def travel(self, a, b):
@@ -130,7 +137,21 @@ class World:
             quiet,
         )
 
+    def set_busy_place(self, place):
+        """Make `place` the city's busy spot (replacing any other), or clear it."""
+        if place is None:
+            if self.busy_place:
+                self.log("busy", f"{self.busy_place['place']['name']} is back to normal")
+            self.busy_place = None
+            return
+        self.busy_place = {
+            "place": place,
+            "until": self.now + timedelta(minutes=BUSY_PLACE_MINUTES),
+        }
+        self.log("busy", f"Rush at {place['name']} - orders surging")
+
     def reset_conditions(self):
+        self.busy_place = None
         for state in self.zones.values():
             state.update(spike_until=None, rain_until=None, incentive=None, traffic_noise=0.0)
         self.log("reset", "All demo zone events cleared")
@@ -154,6 +175,8 @@ class World:
 
     def _step_zones(self, quiet):
         now = self.now
+        if self.busy_place and now >= self.busy_place["until"]:
+            self.set_busy_place(None)
         for zone in ZONES:
             zid, state = zone["id"], self.zones[zone["id"]]
             state["traffic_noise"] = max(
@@ -180,9 +203,12 @@ class World:
     def _new_order(self, zone_id, demand):
         self._order_seq += 1
         km = order_distance_km(self.rnd)
+        platform, merchant = pick_partner(self.rnd, ZONE_BY_ID[zone_id]["name"])
         return {
             "id": f"{zone_id}-{self._order_seq}",
             "zone_id": zone_id,
+            "platform": platform,
+            "merchant": merchant,
             "payout": order_payout(self.rnd, km, demand),
             "distance_km": km,
             "eta_min": order_eta_min(self.rnd, km, self.traffic(zone_id)),
@@ -197,7 +223,7 @@ class World:
             "user_id": user_id,
             "shift_id": shift["id"],
             "zone_id": zone_id,
-            "position": None,  # {"lat", "lon", "accuracy", "distance_km", "at"} once GPS reports
+            "in_area": True,  # False while the rider's GPS is outside the service area
             "vehicle": shift["vehicle"],
             "status": "idle",
             "busy_until": None,
@@ -211,6 +237,7 @@ class World:
             "earned": shift["base_earned"] if earned is None else earned,
             "orders_done": orders_done,
             "snoozed": {},
+            "decision": None,  # the rider's answer to the current suggestion
             "last_event": None,
             "events": deque(maxlen=30),
         }
@@ -242,9 +269,10 @@ class World:
             rider["status"] = "idle"
         self._step_rider(rider)
 
-    def credit(self, rider, amount, zone_id, kind, note=None):
+    def credit(self, rider, amount, zone_id, kind, **details):
+        """`details`: note, platform, merchant, distance_km - whatever is known."""
         rider["earned"] += amount
-        self.on_earning(rider, amount, zone_id, kind, note)
+        self.on_earning(rider, amount, zone_id, kind, **details)
 
     def _step_rider(self, rider):
         if rider["status"] == "shift_over":
@@ -262,7 +290,7 @@ class World:
 
         if rider["status"] == "idle" and rider["heading_to"]:
             rider["status"] = "heading"  # on the way: no orders until they arrive
-        elif rider["status"] == "idle":
+        elif rider["status"] == "idle" and rider["in_area"]:
             orders = self.zones[rider["zone_id"]]["open_orders"]
             if orders:
                 order = max(orders, key=lambda o: o["payout"] / o["eta_min"])
@@ -281,8 +309,14 @@ class World:
         rider["orders_done"] += 1
         rider["status"], rider["order"] = "idle", None
         zone_name = ZONE_BY_ID[order["zone_id"]]["name"]
-        self.credit(rider, net, order["zone_id"], "order", f"{order['distance_km']} km order")
-        self.log_rider(rider, "order", f"Order delivered in {zone_name}: +Rs {net:.0f} net")
+        self.credit(rider, net, order["zone_id"], "order", platform=order["platform"],
+                    merchant=order["merchant"], distance_km=order["distance_km"])  # fmt: skip
+        self.log_rider(
+            rider,
+            "order",
+            f"{order['platform']} order from {order['merchant']} delivered in {zone_name}: "
+            f"+Rs {net:.0f} net",
+        )
 
         incentive = self.zones[order["zone_id"]]["incentive"]
         if incentive:
@@ -290,7 +324,7 @@ class World:
             incentive["progress"][rider["user_id"]] = done
             if done == incentive["orders_needed"]:
                 self.credit(rider, incentive["bonus"], order["zone_id"], "incentive",
-                            incentive["description"])  # fmt: skip
+                            note=incentive["description"], platform=order["platform"])  # fmt: skip
                 self.log_rider(
                     rider, "incentive", f"Incentive earned in {zone_name}: +Rs {incentive['bonus']}"
                 )
@@ -320,6 +354,11 @@ class World:
                     "temp": weather["temp"],
                     "open_orders": state["open_orders"],
                     "history": HISTORY["zone_avg"][zid],
+                    "busy_place": (
+                        self.busy_place["place"]["name"]
+                        if self.busy_place and self.busy_place["place"]["zone_id"] == zid
+                        else None
+                    ),
                     "incentive": incentive or None,
                 }
             )

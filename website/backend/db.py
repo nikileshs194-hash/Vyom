@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS users (
     name TEXT NOT NULL,
     password_hash TEXT NOT NULL,
     salt TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    synced INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT PRIMARY KEY,
@@ -50,7 +51,10 @@ CREATE TABLE IF NOT EXISTS earnings (
     amount REAL NOT NULL,
     zone_id TEXT,
     kind TEXT NOT NULL,
-    note TEXT
+    note TEXT,
+    platform TEXT,
+    merchant TEXT,
+    distance_km REAL
 );
 CREATE INDEX IF NOT EXISTS earnings_user_ts ON earnings(user_id, ts);
 CREATE TABLE IF NOT EXISTS decisions (
@@ -86,7 +90,21 @@ def init(path=None):
         _conn.row_factory = sqlite3.Row
         _conn.execute("PRAGMA foreign_keys = ON")
         _conn.executescript(SCHEMA)
+        _add_missing_columns()
         _conn.commit()
+
+
+def _add_missing_columns():
+    """Bring a database created by an earlier version up to date."""
+    wanted = {
+        "earnings": {"platform": "TEXT", "merchant": "TEXT", "distance_km": "REAL"},
+        "users": {"synced": "INTEGER NOT NULL DEFAULT 0"},
+    }
+    for table, columns in wanted.items():
+        have = {row["name"] for row in _conn.execute(f"PRAGMA table_info({table})")}
+        for column, kind in columns.items():
+            if column not in have:
+                _conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
 
 def _run(sql, params=()):
@@ -205,12 +223,50 @@ def shift_totals(shift_id):
 # ---------------------------------------------------------------- earnings
 
 
-def add_earning(user_id, shift_id, when, amount, zone_id, kind, note=None):
+def add_earning(user_id, shift_id, when, amount, zone_id, kind, note=None,
+                platform=None, merchant=None, distance_km=None):  # fmt: skip
     _run(
-        "INSERT INTO earnings (user_id, shift_id, ts, amount, zone_id, kind, note) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user_id, shift_id, stamp(when), amount, zone_id, kind, note),
+        "INSERT INTO earnings (user_id, shift_id, ts, amount, zone_id, kind, note, platform, "
+        "merchant, distance_km) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, shift_id, stamp(when), amount, zone_id, kind, note, platform, merchant,
+         distance_km),
+    )  # fmt: skip
+
+
+def is_synced(user_id):
+    row = _one("SELECT synced FROM users WHERE id = ?", (user_id,))
+    return bool(row and row["synced"])
+
+
+def add_synced_orders(user_id, orders):
+    """Store a rider's order history from the partner apps, once."""
+    with _lock:
+        _conn.executemany(
+            "INSERT INTO earnings (user_id, shift_id, ts, amount, zone_id, kind, platform, "
+            "merchant, distance_km) VALUES (?, NULL, ?, ?, ?, 'order', ?, ?, ?)",
+            [
+                (user_id, stamp(o["ts"]), o["amount"], o["zone_id"], o["platform"],
+                 o["merchant"], o["distance_km"])
+                for o in orders
+            ],
+        )  # fmt: skip
+        _conn.execute("UPDATE users SET synced = 1 WHERE id = ?", (user_id,))
+        _conn.commit()
+
+
+def earnings_by_platform(user_id, since):
+    return _all(
+        "SELECT platform, SUM(amount) AS amount, SUM(kind = 'order') AS orders FROM earnings "
+        "WHERE user_id = ? AND ts >= ? AND platform IS NOT NULL GROUP BY platform "
+        "ORDER BY amount DESC",
+        (user_id, stamp(since)),
     )
+
+
+def order_count(user_id):
+    return _one(
+        "SELECT COUNT(*) AS n FROM earnings WHERE user_id = ? AND kind = 'order'", (user_id,)
+    )["n"]
 
 
 def earnings_by_day(user_id, since):
@@ -240,8 +296,8 @@ def earnings_by_zone(user_id, since):
 
 def recent_earnings(user_id, limit=15):
     return _all(
-        "SELECT ts, amount, zone_id, kind, note FROM earnings WHERE user_id = ? "
-        "ORDER BY id DESC LIMIT ?",
+        "SELECT ts, amount, zone_id, kind, note, platform, merchant, distance_km "
+        "FROM earnings WHERE user_id = ? ORDER BY ts DESC, id DESC LIMIT ?",
         (user_id, limit),
     )
 

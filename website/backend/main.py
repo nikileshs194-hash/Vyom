@@ -21,9 +21,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 import db
+import partners
 from agents import demand_level, master_agent
-from data import HISTORY, IST, ZONE_BY_ID, ZONES, weekly_summary
-from live import OFFLINE, WEATHER_CODES, Roads, Traffic, Weather, haversine_km
+from data import (
+    CITY,
+    HISTORY,
+    IST,
+    PLACE_BY_ID,
+    PLACES,
+    ZONE_BY_ID,
+    ZONES,
+    place_busy_now,
+    weekly_summary,
+)
+from live import OFFLINE, WEATHER_CODES, Places, Roads, Traffic, Weather, haversine_km
 from world import World
 
 SNOOZE_MINUTES = 20  # how long an ignored zone stays out of the recommendations
@@ -32,9 +43,9 @@ SERVICE_RADIUS_KM = 8  # further than this from every zone = outside the service
 TRAIL_MIN_METRES = 30  # store a new location point only after moving this far...
 TRAIL_MAX_SECONDS = 120  # ...or after this long
 ACTIVITY_WEEKS = 18
-DEFAULT_ZONE = "KOR"
+DEFAULT_ZONE = "MDP"
 
-WEATHER, ROADS, TRAFFIC = Weather(), Roads(), Traffic()
+WEATHER, ROADS, TRAFFIC, GEOCODER = Weather(), Roads(), Traffic(), Places()
 LOCK = threading.RLock()
 STOP = threading.Event()
 
@@ -46,8 +57,25 @@ def real_now():
     return datetime.now(IST)
 
 
-def record_earning(rider, amount, zone_id, kind, note):
-    db.add_earning(rider["user_id"], rider["shift_id"], WORLD.now, amount, zone_id, kind, note)
+def record_earning(rider, amount, zone_id, kind, **details):
+    db.add_earning(rider["user_id"], rider["shift_id"], WORLD.now, amount, zone_id, kind,
+                   **details)  # fmt: skip
+
+
+def activity_start(now):
+    """Monday of the first week shown in the activity grid."""
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight - timedelta(days=now.weekday() + 7 * (ACTIVITY_WEEKS - 1))
+
+
+def sync_partner_history(user_id, zone_id):
+    """First time we know where a rider works: pull in their order history
+    from the partner apps (generated - see partners.py). Happens once."""
+    if db.is_synced(user_id):
+        return
+    now = WORLD.now
+    orders = partners.past_orders(user_id, zone_id, activity_start(now).date(), now)
+    db.add_synced_orders(user_id, orders)
 
 
 def reset_world(now=None, seed=None, db_path=None):
@@ -61,10 +89,11 @@ def reset_world(now=None, seed=None, db_path=None):
             shift["started_at"] = datetime.fromisoformat(shift["started_at"]).replace(tzinfo=IST)
             earned, orders = db.shift_totals(shift["id"])
             last = db.last_location(shift["user_id"])
+            known = last and last["zone_id"] in ZONE_BY_ID
             WORLD.add_rider(
                 shift["user_id"],
                 shift,
-                (last and last["zone_id"]) or DEFAULT_ZONE,
+                last["zone_id"] if known else DEFAULT_ZONE,
                 earned=shift["base_earned"] + earned,
                 orders_done=orders,
             )
@@ -145,9 +174,8 @@ class ZoneEventIn(BaseModel):
     zone_id: str
 
 
-class EarningIn(BaseModel):
-    amount: float = Field(gt=0, le=100000)
-    note: Optional[str] = Field(default=None, max_length=80)
+class BusyPlaceIn(BaseModel):
+    place_id: Optional[str] = None  # None clears the busy place
 
 
 # ---------------- helpers ----------------
@@ -210,7 +238,31 @@ def build_recommendation(rider):
     if rec["target_zone_id"] == location != rider["zone_id"]:
         # already agreed to go to this zone but not there yet
         rec["action"] = f"Continue to {rec['target_zone_name']}"
+
+    # where exactly to go: the busy place itself if that is the draw, else the zone centre
+    surge = WORLD.busy_place
+    spot = surge["place"] if surge and rec["busy_place"] else ZONE_BY_ID[rec["target_zone_id"]]
+    rec["destination"] = {"name": spot["name"], "lat": spot["lat"], "lon": spot["lon"]}
+
+    # an answer stands until GigPilot suggests a different zone
+    decision = rider["decision"]
+    if decision and decision["target_zone_id"] != rec["target_zone_id"]:
+        decision = rider["decision"] = None
+    rec["decision"] = decision and {"outcome": decision["outcome"], "time": decision["time"]}
     return rec
+
+
+def decide(user, rider, rec, outcome):
+    """Record the rider's answer; it stays in force while the suggestion is unchanged."""
+    db.add_decision(user["id"], WORLD.now, rec["action"], outcome, rec["confidence"])
+    rider["last_event"] = f"{outcome}: {rec['action']}"
+    rider["decision"] = None
+    after = build_recommendation(rider)
+    rider["decision"] = {
+        "outcome": outcome,
+        "time": WORLD.now.strftime("%H:%M"),
+        "target_zone_id": after["target_zone_id"],
+    }
 
 
 def rider_view(rider):
@@ -238,6 +290,10 @@ def rider_view(rider):
         )
     elif rider["status"] == "shift_over":
         view["status_text"] = "Shift over"
+    elif not rider["in_area"]:
+        view["status_text"] = (
+            f"Outside the {CITY} service area - no orders until you are back in a zone"
+        )
     else:
         view["status_text"] = f"Waiting for an order in {zone['name']}"
     return view
@@ -273,6 +329,7 @@ def position_view(user_id):
         "lon": pos["lon"],
         "accuracy": pos["accuracy"],
         "manual": pos["manual"],
+        "place": pos["place"],
         "zone_id": pos["zone_id"],
         "zone_name": ZONE_BY_ID[pos["zone_id"]]["name"],
         "distance_km": round(pos["distance_km"], 1),
@@ -295,10 +352,14 @@ def update_position(user, lat, lon, accuracy, manual):
     POSITIONS[user["id"]] = {
         "lat": lat, "lon": lon, "accuracy": accuracy, "manual": manual,
         "zone_id": zone["id"], "distance_km": distance, "at": now, "saved": saved,
+        "place": zone["name"] if manual else (previous or {}).get("place"),
     }  # fmt: skip
     rider = WORLD.riders.get(user["id"])
     if rider:
+        rider["in_area"] = distance <= SERVICE_RADIUS_KM
         WORLD.set_zone(rider, zone["id"])
+    if distance <= SERVICE_RADIUS_KM:
+        sync_partner_history(user["id"], zone["id"])
 
 
 # ---------------- accounts ----------------
@@ -359,6 +420,10 @@ def get_route(b: str, user=Depends(current_user)):
 def set_location(body: LocationIn, user=Depends(current_user)):
     with LOCK:
         update_position(user, body.lat, body.lon, body.accuracy, manual=False)
+    place = GEOCODER.name(body.lat, body.lon)  # network call: keep it outside the lock
+    with LOCK:
+        if place and user["id"] in POSITIONS:
+            POSITIONS[user["id"]]["place"] = place
         return position_view(user["id"])
 
 
@@ -385,7 +450,11 @@ def set_goal(goal: GoalIn, user=Depends(current_user)):
             base_hours=goal.hours_elapsed,
         )
         pos = POSITIONS.get(user["id"])
-        WORLD.add_rider(user["id"], shift, pos["zone_id"] if pos else DEFAULT_ZONE)
+        rider = WORLD.add_rider(user["id"], shift, pos["zone_id"] if pos else DEFAULT_ZONE)
+        if pos and pos["distance_km"] > SERVICE_RADIUS_KM:
+            rider["in_area"] = False
+            if rider["status"] == "on_order":  # taken before the flag was set: hand it back
+                rider["status"], rider["order"] = "idle", None
     return {"ok": True}
 
 
@@ -407,6 +476,7 @@ def get_state(user=Depends(current_user)):
         raining = sum(1 for v in views if v["rain"] >= 0.5)
         data = {
             "user": user,
+            "city_name": CITY,
             "started": rider is not None,
             "clock": {"time": now.strftime("%H:%M"), "date": now.strftime("%a %d %b")},
             "position": position_view(user["id"]),
@@ -447,6 +517,11 @@ def get_state(user=Depends(current_user)):
                 }
                 for v in views
             ],
+            "busy_place": WORLD.busy_place and {
+                **{k: WORLD.busy_place["place"][k] for k in ("id", "name", "lat", "lon")},
+                "zone_name": ZONE_BY_ID[WORLD.busy_place["place"]["zone_id"]]["name"],
+                "until": WORLD.busy_place["until"].strftime("%H:%M"),
+            },
             "city_events": list(WORLD.events)[:12],
             "trail": db.trail(user["id"], now.replace(hour=0, minute=0, second=0)),
         }
@@ -481,8 +556,7 @@ def accept_recommendation(user=Depends(current_user)):
         rider = rider_for(user)
         rec = build_recommendation(rider)
         WORLD.head_to(rider, rec["target_zone_id"])
-        db.add_decision(user["id"], WORLD.now, rec["action"], "Accepted", rec["confidence"])
-        rider["last_event"] = f"Accepted: {rec['action']}"
+        decide(user, rider, rec, "Accepted")
         zone = ZONE_BY_ID[rec["target_zone_id"]]
         return {"ok": True, "target_zone_name": zone["name"], "lat": zone["lat"],
                 "lon": zone["lon"]}  # fmt: skip
@@ -497,8 +571,7 @@ def ignore_recommendation(user=Depends(current_user)):
             rider["snoozed"][rec["target_zone_id"]] = WORLD.now + timedelta(
                 minutes=SNOOZE_MINUTES
             )
-        db.add_decision(user["id"], WORLD.now, rec["action"], "Ignored", rec["confidence"])
-        rider["last_event"] = f"Ignored: {rec['action']}"
+        decide(user, rider, rec, "Ignored")
         return {"ok": True}
 
 
@@ -507,6 +580,7 @@ def cancel_move(user=Depends(current_user)):
     with LOCK:
         rider = rider_for(user)
         WORLD.head_to(rider, rider["zone_id"])
+        rider["decision"] = None
         rider["last_event"] = "Move cancelled - taking orders here again"
         return {"ok": True}
 
@@ -521,29 +595,18 @@ def get_history(user=Depends(current_user)):
 # ---------------- earnings tracking ----------------
 
 
-@app.post("/api/earnings")
-def log_earning(body: EarningIn, user=Depends(current_user)):
-    """Log money earned outside the order feed (cash tips, another app...)."""
-    with LOCK:
-        rider = WORLD.riders.get(user["id"])
-        pos = POSITIONS.get(user["id"])
-        zone_id = rider["zone_id"] if rider else (pos and pos["zone_id"])
-        if rider:
-            WORLD.credit(rider, body.amount, zone_id, "manual", body.note)
-            WORLD.log_rider(rider, "manual", f"Logged by you: +Rs {body.amount:.0f}")
-        else:
-            db.add_earning(user["id"], None, WORLD.now, body.amount, zone_id, "manual", body.note)
-    return {"ok": True}
-
-
 @app.get("/api/activity")
 def get_activity(user=Depends(current_user)):
     """Earnings by day (activity grid) and by hour of day (when you earn)."""
     now = WORLD.now
     today = now.date()
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    grid_start = midnight - timedelta(days=today.weekday() + 7 * (ACTIVITY_WEEKS - 1))
+    grid_start = activity_start(now)
     week_start = midnight - timedelta(days=6)
+    with LOCK:
+        rider = WORLD.riders.get(user["id"])
+        if rider and rider["in_area"]:
+            sync_partner_history(user["id"], rider["zone_id"])
 
     by_day = {r["day"]: r for r in db.earnings_by_day(user["id"], grid_start)}
     days = []
@@ -564,8 +627,11 @@ def get_activity(user=Depends(current_user)):
         for r in db.earnings_by_day_hour(user["id"], week_start)
     }
     hourly = []
+    hour_totals = [0.0] * 24  # summed before rounding, so totals match the daily grid
     for i in range(7):
         day = (week_start + timedelta(days=i)).date()
+        for h in range(24):
+            hour_totals[h] += cells.get((day.isoformat(), h), 0)
         hourly.append(
             {
                 "date": day.isoformat(),
@@ -573,16 +639,15 @@ def get_activity(user=Depends(current_user)):
                 "hours": [round(cells.get((day.isoformat(), h), 0)) for h in range(24)],
             }
         )
-    hour_totals = [sum(row["hours"][h] for row in hourly) for h in range(24)]
     worked = [h for h in range(24) if hour_totals[h] > 0]
 
     def hour_label(h):
         return datetime(2000, 1, 1, h).strftime("%I %p").lstrip("0")
 
     def hour_stat(h):
-        return {"hour": h, "label": hour_label(h), "amount": hour_totals[h]}
+        return {"hour": h, "label": hour_label(h), "amount": round(hour_totals[h])}
 
-    week_total = sum(hour_totals)
+    week_total = round(sum(hour_totals))
     zones = [
         {
             "zone_name": ZONE_BY_ID[z["zone_id"]]["name"] if z["zone_id"] in ZONE_BY_ID else "-",
@@ -604,19 +669,76 @@ def get_activity(user=Depends(current_user)):
             hour_stat(min(worked, key=lambda h: hour_totals[h])) if len(worked) > 1 else None
         ),
         "zones": zones,
+        "synced": db.is_synced(user["id"]),
+        "total_orders": db.order_count(user["id"]),
+        "platforms": [
+            {
+                "name": p["platform"],
+                "amount": round(p["amount"]),
+                "orders": p["orders"],
+                "share_pct": round(100 * p["amount"] / week_total) if week_total else 0,
+            }
+            for p in db.earnings_by_platform(user["id"], week_start)
+        ],
         "recent": [
             {
                 "time": e["ts"][11:16],
                 "date": e["ts"][:10],
                 "amount": round(e["amount"]),
                 "kind": e["kind"],
-                "zone_name": ZONE_BY_ID[e["zone_id"]]["name"] if e["zone_id"] in ZONE_BY_ID else "-",
+                "zone_name": ZONE_BY_ID[e["zone_id"]]["name"] if e["zone_id"] in ZONE_BY_ID else None,
+                "platform": e["platform"],
+                "merchant": e["merchant"],
+                "distance_km": e["distance_km"],
                 "note": e["note"],
             }
-            for e in db.recent_earnings(user["id"])
+            for e in db.recent_earnings(user["id"], 20)
         ],
         "market": {"best_window": market["best_window"], "best_zone": market["best_zone"]},
     }
+
+
+# ---------------- busy places ----------------
+
+
+@app.get("/api/places")
+def get_places(user=Depends(current_user)):
+    """The busy-places dataset, with how busy each one is at this hour."""
+    with LOCK:
+        now, surge = WORLD.now, WORLD.busy_place
+        active = surge["place"]["id"] if surge else None
+    rows = [
+        {
+            "id": p["id"],
+            "name": p["name"],
+            "category": p["category"],
+            "zone_name": ZONE_BY_ID[p["zone_id"]]["name"],
+            "lat": p["lat"],
+            "lon": p["lon"],
+            "busy": p["busy"],
+            "busy_now": 5.0 if p["id"] == active else place_busy_now(p, now),
+            "active": p["id"] == active,
+        }
+        for p in PLACES
+    ]
+    return sorted(rows, key=lambda r: (not r["active"], -r["busy_now"], r["name"]))
+
+
+@app.post("/api/busy-place")
+def set_busy_place(body: BusyPlaceIn, user=Depends(current_user)):
+    """Set (or change, or clear) the place that is busy right now."""
+    if body.place_id is not None and body.place_id not in PLACE_BY_ID:
+        raise HTTPException(status_code=404, detail=f"Unknown place '{body.place_id}'")
+    with LOCK:
+        place = PLACE_BY_ID[body.place_id] if body.place_id else None
+        WORLD.set_busy_place(place)
+        rider = WORLD.riders.get(user["id"])
+        if rider:
+            rider["snoozed"] = {}
+            rider["last_event"] = (
+                f"Busy place set: {place['name']}" if place else "Busy place cleared"
+            )
+    return {"ok": True}
 
 
 # ---------------- demo tools (simulated events) ----------------

@@ -1,7 +1,7 @@
 """
 GigPilot - city model and synthetic market data.
 
-Zone locations are real Bengaluru localities. Everything that a delivery
+Zone locations are real Hyderabad localities. Everything that a delivery
 platform would normally own (orders, payouts, demand history) is generated
 here, because no platform exposes it for free. It is generated from one
 consistent demand model, so history, live orders and forecasts agree.
@@ -10,6 +10,8 @@ consistent demand model, so history, live orders and forecasts agree.
 import math
 import random
 from datetime import datetime, timedelta, timezone
+
+from places import CATEGORY_PROFILE, PLACES
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -23,39 +25,41 @@ HISTORY_DAYS = 28
 BASE_ORDERS_PER_HOUR = 12  # market-wide orders per zone-hour at demand index 1.0
 
 # (id, name, lat, lon, type)
+CITY = "Hyderabad"
+
 _ZONE_ROWS = [
-    ("KOR", "Koramangala", 12.9352, 77.6245, "nightlife"),
-    ("IND", "Indiranagar", 12.9784, 77.6408, "nightlife"),
-    ("HSR", "HSR Layout", 12.9116, 77.6474, "residential"),
-    ("WHF", "Whitefield", 12.9698, 77.7500, "tech"),
-    ("ECT", "Electronic City", 12.8452, 77.6602, "tech"),
-    ("MAR", "Marathahalli", 12.9591, 77.6974, "tech"),
-    ("BEL", "Bellandur", 12.9304, 77.6784, "tech"),
-    ("BTM", "BTM Layout", 12.9166, 77.6101, "residential"),
-    ("JAY", "Jayanagar", 12.9308, 77.5838, "residential"),
-    ("JPN", "JP Nagar", 12.9063, 77.5857, "residential"),
-    ("BSK", "Banashankari", 12.9255, 77.5468, "residential"),
-    ("BAS", "Basavanagudi", 12.9421, 77.5754, "residential"),
-    ("MGR", "MG Road", 12.9756, 77.6066, "commercial"),
-    ("SHV", "Shivajinagar", 12.9857, 77.6057, "commercial"),
-    ("MAL", "Malleshwaram", 13.0031, 77.5643, "residential"),
-    ("RAJ", "Rajajinagar", 12.9910, 77.5550, "residential"),
-    ("YPR", "Yeshwanthpur", 13.0280, 77.5400, "commercial"),
-    ("HEB", "Hebbal", 13.0358, 77.5970, "residential"),
-    ("YEL", "Yelahanka", 13.1007, 77.5963, "residential"),
-    ("RTN", "RT Nagar", 13.0210, 77.5950, "residential"),
-    ("KLN", "Kalyan Nagar", 13.0280, 77.6400, "nightlife"),
-    ("KRP", "KR Puram", 13.0075, 77.6959, "residential"),
-    ("DOM", "Domlur", 12.9610, 77.6387, "commercial"),
-    ("SJP", "Sarjapur Road", 12.9010, 77.6860, "tech"),
-    ("BGR", "Bannerghatta Road", 12.8876, 77.5970, "residential"),
-    ("VIJ", "Vijayanagar", 12.9719, 77.5309, "residential"),
-    ("MAJ", "Majestic", 12.9767, 77.5713, "commercial"),
-    ("FRZ", "Frazer Town", 12.9982, 77.6140, "nightlife"),
-    ("BRK", "Brookefield", 12.9655, 77.7185, "tech"),
-    ("MNY", "Manyata Tech Park", 13.0477, 77.6210, "tech"),
-    ("KEN", "Kengeri", 12.9080, 77.4850, "residential"),
-    ("CVR", "CV Raman Nagar", 12.9850, 77.6630, "residential"),
+    ("MDP", "Madhapur", 17.4483, 78.3915, "tech"),
+    ("HTC", "HITEC City", 17.4435, 78.3772, "tech"),
+    ("GCB", "Gachibowli", 17.4401, 78.3489, "tech"),
+    ("KDP", "Kondapur", 17.4622, 78.3568, "tech"),
+    ("FND", "Financial District", 17.4144, 78.3426, "tech"),
+    ("KKP", "Kukatpally", 17.4849, 78.4138, "residential"),
+    ("MYP", "Miyapur", 17.4968, 78.3614, "residential"),
+    ("JBH", "Jubilee Hills", 17.4326, 78.4071, "nightlife"),
+    ("BJH", "Banjara Hills", 17.4156, 78.4347, "nightlife"),
+    ("AMP", "Ameerpet", 17.4375, 78.4483, "commercial"),
+    ("BGP", "Begumpet", 17.4447, 78.4664, "commercial"),
+    ("SMG", "Somajiguda", 17.4239, 78.4587, "commercial"),
+    ("SEC", "Secunderabad", 17.4399, 78.4983, "commercial"),
+    ("ABD", "Abids", 17.3930, 78.4730, "commercial"),
+    ("CHM", "Charminar", 17.3616, 78.4747, "commercial"),
+    ("HMN", "Himayatnagar", 17.4010, 78.4880, "nightlife"),
+    ("DSN", "Dilsukhnagar", 17.3688, 78.5247, "residential"),
+    ("LBN", "LB Nagar", 17.3457, 78.5522, "residential"),
+    ("UPL", "Uppal", 17.4058, 78.5591, "residential"),
+    ("TRN", "Tarnaka", 17.4284, 78.5386, "residential"),
+    ("MKG", "Malkajgiri", 17.4474, 78.5265, "residential"),
+    ("ALW", "Alwal", 17.5020, 78.5090, "residential"),
+    ("BWP", "Bowenpally", 17.4660, 78.4760, "residential"),
+    ("KMP", "Kompally", 17.5350, 78.4850, "residential"),
+    ("MDC", "Medchal", 17.6290, 78.4810, "residential"),
+    ("MNK", "Manikonda", 17.4020, 78.3870, "residential"),
+    ("MHP", "Mehdipatnam", 17.3950, 78.4400, "residential"),
+    ("TLC", "Tolichowki", 17.3990, 78.4150, "nightlife"),
+    ("ATP", "Attapur", 17.3660, 78.4290, "residential"),
+    ("ASR", "AS Rao Nagar", 17.4810, 78.5560, "residential"),
+    ("BCP", "Bachupally", 17.5440, 78.3650, "residential"),
+    ("SMB", "Shamshabad", 17.2603, 78.3969, "commercial"),
 ]
 
 # Demand shape per zone type: a base level plus (peak hour, width, height) bumps.
@@ -70,22 +74,30 @@ _WEEKEND_DEMAND = {"tech": 0.6, "residential": 1.2, "nightlife": 1.4, "commercia
 _CONGESTION = {"tech": 1.2, "commercial": 1.1, "nightlife": 1.0, "residential": 0.8}
 
 
-def _popularity(zone_id):
-    return round(random.Random("pop" + zone_id).uniform(0.85, 1.25), 2)
+def haversine_km(a, b):
+    lat1, lon1, lat2, lon2 = map(math.radians, (a["lat"], a["lon"], b["lat"], b["lon"]))
+    h = (
+        math.sin((lat2 - lat1) / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    )
+    return 6371 * 2 * math.asin(math.sqrt(h))
 
 
 ZONES = [
-    {
-        "id": zid,
-        "name": name,
-        "lat": lat,
-        "lon": lon,
-        "type": ztype,
-        "popularity": _popularity(zid),
-    }
+    {"id": zid, "name": name, "lat": lat, "lon": lon, "type": ztype}
     for zid, name, lat, lon, ztype in _ZONE_ROWS
 ]
 ZONE_BY_ID = {z["id"]: z for z in ZONES}
+
+# every busy place belongs to its nearest zone
+for _place in PLACES:
+    _place["zone_id"] = min(ZONES, key=lambda z: haversine_km(_place, z))["id"]
+PLACE_BY_ID = {p["id"]: p for p in PLACES}
+
+# a zone is as popular as the busy places inside it
+for _zone in ZONES:
+    _busy = sum(p["busy"] for p in PLACES if p["zone_id"] == _zone["id"])
+    _zone["popularity"] = round(min(1.3, 0.9 + 0.04 * _busy), 2)
 
 
 def _bump(hour, peak, width):
@@ -112,6 +124,13 @@ def true_demand(zone, when):
     if is_weekend(when):
         level *= _WEEKEND_DEMAND[zone["type"]]
     return level * zone["popularity"]
+
+
+def place_busy_now(place, when):
+    """How busy a place is right now, 0-5: its own busy score shaped by the
+    time-of-day pattern for that kind of place."""
+    profile = {"type": CATEGORY_PROFILE[place["category"]], "popularity": 1.0}
+    return round(min(5.0, place["busy"] * true_demand(profile, when) / 1.4), 1)
 
 
 def typical_traffic(zone, when):

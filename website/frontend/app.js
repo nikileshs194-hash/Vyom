@@ -1,11 +1,11 @@
 // GigPilot frontend logic.
 // Logs the user in, follows their real GPS position, polls the FastAPI
 // backend for the live city state and redraws the map, the recommendation
-// and the earnings activity boxes. If the page is served by the backend
-// itself (port 8000) it calls the same origin; otherwise it expects the
-// backend on port 8000 of the same machine.
+// and the earnings activity boxes. The backend normally serves this page,
+// so API calls go to the same origin; opened as a file or from a separate
+// static server on port 5500, it expects the backend on localhost:8000.
 const API_BASE =
-  location.port === "8000" ? "" : "http://" + (location.hostname || "localhost") + ":8000";
+  location.protocol === "file:" || location.port === "5500" ? "http://localhost:8000" : "";
 const POLL_MS = 3000;
 const ACTIVITY_MS = 20000;
 const LOCATION_SEND_MS = 5000;
@@ -27,7 +27,9 @@ let polling = false;
 let toastTimer = null;
 
 let map = null;
+let places = [];
 let youMarker = null;
+let busyMarker = null;
 let accuracyCircle = null;
 let trailLayer = null;
 let routeLayer = null;
@@ -198,8 +200,10 @@ async function enterApp() {
   await poll();
   refreshActivity();
   refreshHistory();
+  refreshPlaces();
   timers.push(setInterval(poll, POLL_MS));
   timers.push(setInterval(refreshActivity, ACTIVITY_MS));
+  timers.push(setInterval(refreshPlaces, 60000));
 }
 
 async function init() {
@@ -251,8 +255,11 @@ function startLocationWatch() {
 }
 function locationProblem(message) {
   if (lastState && lastState.position) return; // keep showing the last known position
-  $("locStatus").textContent = message;
-  $("locStatus").classList.add("warn");
+  $("hereLabel").textContent = "Location not shared";
+  $("herePlace").textContent = "Where are you?";
+  $("hereSub").textContent = message;
+  $("hereSub").classList.add("warn");
+  $("hereFallback").classList.remove("hidden");
 }
 $("locateBtn").addEventListener("click", () => {
   lastLocationSent = 0;
@@ -266,36 +273,46 @@ $("manualZone").addEventListener("change", async () => {
 });
 
 function renderLocation(pos) {
-  const status = $("locStatus");
-  const link = $("locMapsLink");
+  const sub = $("hereSub");
+  const live = Boolean(pos) && !pos.manual;
+  $("hereDot").classList.toggle("on", live);
+  $("hereFallback").classList.toggle("hidden", live);
   if (!pos) {
-    link.classList.add("hidden");
+    if ($("hereLabel").textContent !== "Location not shared") {
+      $("hereLabel").textContent = "Location not shared yet";
+      $("herePlace").textContent = "Where are you?";
+      sub.textContent = "Share your location to see where you are and get orders near you.";
+    }
     return;
   }
-  status.classList.toggle("warn", !pos.in_service_area);
+  sub.classList.toggle("warn", !pos.in_service_area);
   if (pos.manual) {
-    status.textContent = "Set by hand to " + pos.zone_name + " - not tracking a real position.";
-  } else if (pos.in_service_area) {
-    status.textContent =
-      "Tracking your real position: " + pos.lat.toFixed(5) + ", " + pos.lon.toFixed(5) +
-      (pos.accuracy ? " (within " + Math.round(pos.accuracy) + " m)" : "") +
-      " - nearest zone " + pos.zone_name + ", " + pos.distance_km + " km away. Updated " +
-      pos.updated + ".";
-  } else {
-    status.textContent =
-      "Tracking your real position: " + pos.lat.toFixed(5) + ", " + pos.lon.toFixed(5) +
-      ". You are " + pos.distance_km + " km outside the Bengaluru service area, so zone " +
-      "recommendations start from the nearest zone, " + pos.zone_name + ".";
+    $("hereLabel").textContent = "Set by hand";
+    $("herePlace").textContent = pos.zone_name;
+    sub.textContent = "Not tracking your real position.";
+    return;
   }
-  link.href = placeUrl(pos.lat, pos.lon);
-  link.classList.remove("hidden");
+  $("hereLabel").textContent = "Live location";
+  $("herePlace").textContent = pos.place || pos.lat.toFixed(4) + ", " + pos.lon.toFixed(4);
+  if (pos.in_service_area) {
+    sub.textContent =
+      pos.zone_name + " zone · " + pos.distance_km + " km away · updated " +
+      pos.updated.slice(0, 5) +
+      // a fix this loose comes from the network, not a GPS chip
+      (pos.accuracy > 1000 ? " · approximate, no GPS on this device" : "");
+  } else {
+    sub.textContent =
+      pos.distance_km + " km outside the " + lastState.city_name +
+      " service area - no orders are assigned. Nearest zone: " + pos.zone_name + ".";
+  }
 }
 
 // -------------------------------------------------------------------- map
 
 function initMap() {
   if (map || !window.L) return;
-  map = L.map("map", { scrollWheelZoom: false }).setView([12.965, 77.62], 11);
+  const mid = (key) => zones.reduce((sum, z) => sum + z[key], 0) / zones.length;
+  map = L.map("map", { scrollWheelZoom: false }).setView([mid("lat"), mid("lon")], 11);
   L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 18,
     attribution:
@@ -315,6 +332,14 @@ function initMap() {
     window.open(placeUrl(event.latlng.lat, event.latlng.lng), "_blank", "noopener");
   });
   trailLayer = L.polyline([], { color: "#2a78d6", weight: 3, opacity: 0.7 }).addTo(map);
+  busyMarker = L.marker([0, 0], {
+    icon: L.divIcon({ className: "busy-marker", iconSize: [20, 20] }),
+    zIndexOffset: 900,
+  }).on("click", (event) => {
+    L.DomEvent.stopPropagation(event);
+    const spot = busyMarker.getLatLng();
+    window.open(directionsUrl(spot.lat, spot.lng), "_blank", "noopener");
+  });
   youMarker = L.marker([0, 0], {
     icon: L.divIcon({ className: "you-marker", iconSize: [18, 18] }),
     zIndexOffset: 1000,
@@ -396,6 +421,16 @@ function renderMap(data) {
   }
   trailLayer.setLatLngs(data.trail);
 
+  const busy = data.busy_place;
+  if (busy) {
+    busyMarker.setLatLng([busy.lat, busy.lon]).bindTooltip(
+      busy.name + " - busy until " + busy.until, { direction: "top", offset: [0, -10] }
+    );
+    if (!map.hasLayer(busyMarker)) busyMarker.addTo(map);
+  } else if (map.hasLayer(busyMarker)) {
+    busyMarker.remove();
+  }
+
   const moving = data.rider && targetId && targetId !== data.rider.zone_id;
   updateRoute(moving ? targetId : null, pos);
 }
@@ -407,38 +442,22 @@ function renderStatus(data) {
   $("navName").textContent = data.user.name;
 
   const city = data.city;
-  const chips = [
-    ["Weather", city.temp + "°C, " + city.condition],
-    ["Open orders", city.open_orders],
-    ["Incentives live", city.active_incentives],
-    ["Avg traffic", "x" + city.avg_traffic.toFixed(2)],
+  const traffic =
+    city.avg_traffic < 1.15 ? "Light" : city.avg_traffic < 1.4 ? "Moderate" : "Heavy";
+  const stats = [
+    [city.temp + "°C · " + city.condition,
+      city.rain_zones ? "Raining in " + city.rain_zones + " zones" : "Weather"],
+    [city.open_orders, "Open orders in the city"],
+    [city.active_incentives, "Incentives live"],
+    [traffic, "Traffic"],
   ];
-  if (city.rain_zones) chips.splice(1, 0, ["Raining in", city.rain_zones + " zones"]);
-  const chipBox = $("cityChips");
-  chipBox.innerHTML = "";
-  chips.forEach(([label, value]) => {
-    const chip = el("span", label + " ", "chip");
-    chip.appendChild(el("b", String(value)));
-    chipBox.appendChild(chip);
-  });
-
-  const sourceBox = $("sourceBadges");
-  sourceBox.innerHTML = "";
-  const sources = { ...data.sources };
-  const pos = data.position;
-  sources.location = pos && !pos.manual
-    ? { mode: "live", source: "your GPS", detail: "updated " + pos.updated }
-    : { mode: "off", source: "not shared", detail: "allow location in the browser" };
-  Object.entries(sources).forEach(([name, s]) => {
-    const badge = el("span", "", "source" + (s.mode === "live" ? " live" : ""));
-    badge.title = s.source + " - " + s.detail;
-    badge.appendChild(el("i", "", "dot"));
-    badge.appendChild(el("b", name[0].toUpperCase() + name.slice(1)));
-    const text = s.mode === "live" ? "LIVE · " + s.source
-      : name === "orders" ? "PARTNER DATA STAND-IN"
-      : name === "location" ? "NOT SHARED" : "ESTIMATED";
-    badge.appendChild(el("span", text));
-    sourceBox.appendChild(badge);
+  const box = $("cityChips");
+  box.innerHTML = "";
+  stats.forEach(([value, label]) => {
+    const stat = el("div", undefined, "here-stat");
+    stat.appendChild(el("b", String(value)));
+    stat.appendChild(el("span", label));
+    box.appendChild(stat);
   });
 }
 
@@ -457,21 +476,34 @@ function renderShift(data) {
   const gap = m.projected_earnings - m.target_earnings;
   $("mProjectedSub").textContent =
     gap >= 0 ? rs(gap) + " above goal" : rs(-gap) + " short of goal";
-  $("mZone").textContent = m.current_zone_name;
-  $("mStatus").textContent = r.status_text;
+  const pos = data.position;
+  const exact = pos && !pos.manual;
+  $("mZone").textContent = exact
+    ? pos.place || pos.lat.toFixed(4) + ", " + pos.lon.toFixed(4)
+    : m.current_zone_name;
+  $("mStatus").textContent =
+    (exact ? "Zone: " + m.current_zone_name + " (" + pos.distance_km + " km) · " : "") +
+    r.status_text;
 
   const rec = data.recommendation;
   $("recAction").textContent = rec.action;
   $("recReason").textContent = rec.reason;
   $("confFill").style.width = rec.confidence + "%";
   $("confLabel").textContent = "Confidence: " + rec.confidence + "%";
-  const over = r.status === "shift_over";
-  $("acceptBtn").disabled = over;
-  $("ignoreBtn").disabled = over;
+  // once answered, the buttons give way to the answer until the suggestion changes
+  const answered = Boolean(rec.decision) || r.status === "shift_over";
+  $("acceptBtn").classList.toggle("hidden", answered);
+  $("ignoreBtn").classList.toggle("hidden", answered);
+  $("decisionNote").classList.toggle("hidden", !rec.decision);
+  if (rec.decision) {
+    $("decisionNote").textContent =
+      (rec.decision.outcome === "Ignored" ? "Last suggestion ignored" : "Accepted") +
+      " at " + rec.decision.time;
+  }
   $("cancelMoveBtn").classList.toggle("hidden", !r.heading_to);
-  const target = zones.find((z) => z.id === rec.target_zone_id);
-  $("recMapsLink").href = directionsUrl(target.lat, target.lon);
-  $("recMapsLink").textContent = "Open route to " + target.name + " in Google Maps";
+  const dest = rec.destination;
+  $("recMapsLink").href = directionsUrl(dest.lat, dest.lon);
+  $("recMapsLink").textContent = "Open route to " + dest.name + " in Google Maps";
 
   const traceList = $("traceList");
   traceList.innerHTML = "";
@@ -532,13 +564,11 @@ function render(data) {
   renderStatus(data);
   renderLocation(data.position);
   renderMap(data);
+  renderBusyPlace(data.busy_place);
   ["dashboard", "kpis", "recBody", "endBtn"].forEach((id) =>
     $(id).classList.toggle("hidden", !data.started)
   );
   $("recEmpty").classList.toggle("hidden", data.started);
-  const badge = $("statusBadge");
-  badge.textContent = data.started ? "MONITORING" : "WAITING FOR GOAL";
-  badge.className = "badge " + (data.started ? "badge-monitoring" : "badge-waiting");
   if (data.started) {
     renderShift(data);
     renderFeed(data);
@@ -564,6 +594,78 @@ async function poll() {
     polling = false;
   }
 }
+
+// ------------------------------------------------------------ busy places
+
+function renderBusyPlace(busy) {
+  const note = $("busyActive");
+  note.classList.toggle("hidden", !busy);
+  if (busy) {
+    note.textContent =
+      busy.name + " is the busy place now (" + busy.zone_name + " zone, until " + busy.until + ")";
+  }
+}
+
+async function refreshPlaces() {
+  if (!token) return;
+  try {
+    places = await apiGet("/api/places", true);
+  } catch (err) {
+    return;
+  }
+  const options = $("placeOptions");
+  if (!options.children.length) {
+    places
+      .map((p) => p.name)
+      .sort()
+      .forEach((name) => {
+        const opt = el("option");
+        opt.value = name;
+        options.appendChild(opt);
+      });
+  }
+  const list = $("placeList");
+  list.innerHTML = "";
+  places.slice(0, 8).forEach((p) => {
+    const li = el("li", undefined, p.active ? "is-active" : "");
+    const left = el("span", p.name + " ");
+    left.appendChild(
+      el("span", p.zone_name + " zone · " + p.category + (p.active ? " · busy now" : ""), "sub")
+    );
+    const boxes = el("span", undefined, "place-boxes");
+    boxes.title = "Busy level " + p.busy_now.toFixed(1) + " of 5";
+    for (let i = 1; i <= 5; i++) {
+      boxes.appendChild(el("i", "", p.busy_now >= i - 0.5 ? "lv4" : "lv0"));
+    }
+    li.appendChild(left);
+    li.appendChild(boxes);
+    list.appendChild(li);
+  });
+}
+
+async function setBusyPlace(placeId) {
+  await apiPost("/api/busy-place", { place_id: placeId });
+  await poll();
+  refreshPlaces();
+}
+$("busyForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const typed = $("busyInput").value.trim().toLowerCase();
+  const match =
+    places.find((p) => p.name.toLowerCase() === typed) ||
+    places.find((p) => p.name.toLowerCase().includes(typed));
+  if (!match) {
+    showToast("That place is not in the list - pick one of the suggestions.", true);
+    return;
+  }
+  $("busyInput").value = match.name;
+  await setBusyPlace(match.id);
+  showToast(match.name + " set as the busy place.");
+});
+$("busyClear").addEventListener("click", async () => {
+  $("busyInput").value = "";
+  await setBusyPlace(null);
+});
 
 // ------------------------------------------------------ earnings activity
 
@@ -634,13 +736,36 @@ async function refreshActivity() {
   });
   $("noZones").classList.toggle("hidden", a.zones.length > 0);
 
+  $("syncNote").textContent =
+    a.total_orders.toLocaleString("en-IN") + " orders synced automatically from your " +
+    "delivery apps - nothing to enter by hand.";
+  const platformList = $("platformList");
+  platformList.innerHTML = "";
+  a.platforms.forEach((p) => {
+    const li = el("li");
+    const left = el("span");
+    left.appendChild(el("span", p.name, "app-tag"));
+    left.appendChild(el("span", p.orders + " orders · " + p.share_pct + "%", "sub"));
+    li.appendChild(left);
+    li.appendChild(el("span", rs(p.amount), "amount"));
+    platformList.appendChild(li);
+  });
+
   const recent = $("recentList");
   recent.innerHTML = "";
-  a.recent.slice(0, 8).forEach((e) => {
+  a.recent.forEach((e) => {
     const li = el("li");
-    const what = e.kind === "manual" ? "Logged by you" : e.kind === "incentive" ? "Incentive" : "Order";
-    const left = el("span", what + (e.note ? " - " + e.note : "") + " ");
-    left.appendChild(el("span", e.date.slice(5) + " " + e.time + " · " + e.zone_name, "sub"));
+    const left = el("span");
+    left.appendChild(el("span", e.platform || "Earlier", "app-tag"));
+    const what =
+      e.kind === "incentive" ? "Incentive bonus"
+      : e.kind === "manual" ? "Logged by hand" + (e.note ? " - " + e.note : "")
+      : e.merchant || "Order";
+    left.appendChild(document.createTextNode(what + " "));
+    const where = [e.date.slice(5) + " " + e.time];
+    if (e.zone_name) where.push(e.zone_name);
+    if (e.distance_km) where.push(e.distance_km + " km");
+    left.appendChild(el("span", where.join(" · "), "sub"));
     li.appendChild(left);
     li.appendChild(el("span", "+" + rs(e.amount), "amount"));
     recent.appendChild(li);
@@ -700,19 +825,6 @@ $("ignoreBtn").addEventListener("click", async () => {
   refreshHistory();
 });
 $("cancelMoveBtn").addEventListener("click", () => act("/api/cancel-move"));
-
-$("earnForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  await apiPost("/api/earnings", {
-    amount: parseFloat($("earnAmount").value),
-    note: $("earnNote").value.trim() || null,
-  });
-  $("earnAmount").value = "";
-  $("earnNote").value = "";
-  showToast("Earning added to your activity.");
-  refreshActivity();
-  poll();
-});
 
 const eventBody = () => ({ zone_id: $("eventZone").value });
 $("trafficBtn").addEventListener("click", () => act("/api/simulate/traffic", eventBody()));

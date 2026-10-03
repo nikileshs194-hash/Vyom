@@ -6,7 +6,7 @@
 GigPilot is a goal-driven agentic assistant for gig workers (delivery riders).
 A worker logs in, sets a target earnings amount and the hours they have, and
 GigPilot follows their real location, continuously watches demand, traffic,
-weather and incentives across 32 Bengaluru zones, works out the best place
+weather and incentives across 32 Hyderabad zones, works out the best place
 to go right now, explains why in plain language, and replans live the moment
 conditions change — the worker stays in control and accepts or ignores every
 recommendation.
@@ -37,6 +37,7 @@ those numbers, never invent them.
 | Your location and location trail | The browser's GPS / location service | **Real** |
 | Time | The real clock, in IST | **Real** |
 | Weather (now + hourly forecast, per zone) | [Open-Meteo](https://open-meteo.com) — free, no key | **Real** |
+| Name of the place you are in | [Nominatim](https://nominatim.org) lookup on OpenStreetMap data — free, no key | **Real** |
 | Road distance, drive time, route line on the map | [OSRM](https://project-osrm.org) public server on OpenStreetMap data — free, no key | **Real** (distances cached in `website/backend/cache/roads.json`) |
 | Map and navigation | OpenStreetMap tiles; directions open in Google Maps | **Real** |
 | Accounts, goals, earnings, decisions | SQLite database, one set of data per user | **Real** |
@@ -53,7 +54,7 @@ are stored only as salted scrypt hashes, and every API call needs that
 user's login token. Each account has its own:
 
 - shifts and goals
-- earnings (each order, incentive and manually logged amount, with time and zone)
+- earnings (each order and incentive, with time, zone, app and merchant)
 - accepted / ignored recommendations
 - location trail
 
@@ -69,7 +70,28 @@ Instead of charts, GigPilot shows activity boxes:
 - **When you earn** — one row per day, one box per hour, for the last 7 days,
   with your best and slowest hour
 - **Where you earned** — earnings per zone over the last 7 days
-- **Log an earning** — add money made outside the order feed
+- **Partner apps** — earnings per app (Swiggy, Zomato, Zepto, Blinkit) and the latest
+  orders with merchant, zone and distance
+
+Nothing is entered by hand. Every order carries the app it came through, and the
+first time GigPilot learns which zone a rider works in, it syncs about 18 weeks of
+their past orders (around 1,700) into their account. Both the live orders and that
+history are generated in `website/backend/partners.py`, standing in for the feed the
+delivery platforms would provide.
+
+## Busy places
+
+`website/backend/places.py` is a dataset of 41 well-known busy spots in
+Hyderabad (malls, food streets, markets, office parks, transit hubs) with
+approximate coordinates and an estimated busy score. Each zone's baseline
+popularity comes from the places inside it. On the site you can set which
+place is busy right now: orders surge there, the recommendation moves to
+it, and the Google Maps link points at the place itself. Setting another
+place replaces it. The busy scores are estimates standing in for partner
+sales data.
+
+Once you Accept or Ignore a recommendation, GigPilot shows your answer
+instead of the buttons and only asks again when its suggestion changes.
 
 ## What's in this folder
 
@@ -82,6 +104,8 @@ GigPilot_Submission/
 │   │   ├── world.py        live city state (orders, traffic, riders' shifts)
 │   │   ├── live.py         live data providers (weather, roads, traffic)
 │   │   ├── db.py           SQLite: accounts, shifts, earnings, locations
+│   │   ├── places.py       busy places dataset for Hyderabad
+│   │   ├── partners.py     partner apps: which app an order came from, synced order history
 │   │   └── data.py         zones, demand model, generated order history
 │   └── frontend/           HTML/CSS/JS: login, map (Leaflet), activity boxes
 ├── start_website.sh        <- run this to start the website (Mac/Linux/Git Bash)
@@ -134,7 +158,8 @@ history first.
    your GPS position reaches the zone. **Cancel move** if you change your
    mind; **Ignore** drops that zone from the suggestions for 20 minutes.
 5. If the browser cannot share a location, pick a zone by hand. If you are
-   outside Bengaluru, GigPilot says so and plans from the nearest zone.
+   outside Hyderabad, GigPilot says so, pauses the order feed and plans from
+   the nearest zone.
 6. **Demo tools** (bottom of the page) inject a made-up traffic spike,
    incentive or rain burst so you can watch the agents replan.
 

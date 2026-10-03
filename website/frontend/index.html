@@ -25,7 +25,7 @@
 <section id="authView" class="auth-view hidden">
   <div class="auth-intro">
     <h1>Stop guessing where to drive next.</h1>
-    <p>GigPilot watches demand, traffic, weather and incentives across Bengaluru in real
+    <p>GigPilot watches demand, traffic, weather and incentives across Hyderabad in real
        time, follows your real location, and tells you where to go to hit today's
        earnings goal - and explains why.</p>
   </div>
@@ -54,22 +54,29 @@
 <!-- ============================ logged in ============================= -->
 <main id="appView" class="app-section hidden">
 
-  <section class="status-strip card">
-    <div class="chips" id="cityChips"></div>
-    <div class="sources" id="sourceBadges"></div>
-  </section>
-
-  <section class="card">
-    <h2>Your location</h2>
-    <p id="locStatus" class="loc-status">Waiting for your browser to share your location...</p>
-    <div class="loc-actions">
-      <button id="locateBtn" type="button" class="btn btn-secondary">Share my location</button>
-      <a id="locMapsLink" class="btn btn-secondary hidden" target="_blank" rel="noopener">
-        Open my location in Google Maps</a>
-      <label class="inline-label">or pick a zone by hand
+  <section class="card here-card">
+    <div class="here-main">
+      <div class="here-pin" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11z" />
+          <circle cx="12" cy="10" r="2.5" />
+        </svg>
+      </div>
+      <div class="here-text">
+        <div class="here-label"><i class="live-dot" id="hereDot"></i>
+          <span id="hereLabel">Finding your location...</span></div>
+        <div class="here-place" id="herePlace">-</div>
+        <div class="here-sub" id="hereSub"></div>
+      </div>
+    </div>
+    <div class="here-fallback hidden" id="hereFallback">
+      <button id="locateBtn" type="button" class="btn btn-primary">Share my location</button>
+      <label class="inline-label">or pick a zone
         <select id="manualZone"><option value="">-</option></select>
       </label>
     </div>
+    <div class="here-stats" id="cityChips"></div>
   </section>
 
   <section class="goal-panel card">
@@ -98,7 +105,6 @@
     </div>
     <button id="startBtn" class="btn btn-primary">Start / Update Goal</button>
     <button id="endBtn" class="btn btn-secondary hidden">End shift</button>
-    <span id="statusBadge" class="badge badge-waiting">WAITING FOR GOAL</span>
   </section>
 
   <div id="kpis" class="hidden">
@@ -136,6 +142,7 @@
         <span class="legend-chip"><i class="lv4"></i>Very high</span>
         <span class="legend-chip"><i class="ring ring-target"></i>Recommended</span>
         <span class="legend-chip"><i class="ring ring-incentive"></i>Incentive</span>
+        <span class="legend-chip"><i class="busy-dot"></i>Busy place</span>
         <span class="legend-chip"><i class="you-dot"></i>You</span>
       </div>
     </div>
@@ -151,6 +158,7 @@
         <div class="btn-row">
           <button id="acceptBtn" class="btn btn-primary">Accept</button>
           <button id="ignoreBtn" class="btn btn-secondary">Ignore</button>
+          <span id="decisionNote" class="decision hidden"></span>
           <button id="cancelMoveBtn" class="btn btn-secondary hidden">Cancel move</button>
         </div>
         <a id="recMapsLink" class="maps-link" target="_blank" rel="noopener">
@@ -165,8 +173,33 @@
   </div>
 
   <section class="card">
+    <h2>Busy places in Hyderabad</h2>
+    <p class="muted">Well-known spots where orders concentrate. Set the one that is busy
+       right now and GigPilot plans around it; change it and the suggestion follows.</p>
+    <div class="busy-cols">
+      <div>
+        <h4>Busy place right now</h4>
+        <form id="busyForm" class="busy-form">
+          <input id="busyInput" list="placeOptions" placeholder="Type or pick a place"
+                 autocomplete="off" required />
+          <datalist id="placeOptions"></datalist>
+          <button class="btn btn-primary" type="submit">Set</button>
+          <button class="btn btn-secondary" type="button" id="busyClear">Clear</button>
+        </form>
+        <p id="busyActive" class="busy-active hidden"></p>
+        <p class="muted">Busy scores are estimates that stand in for partner sales data.</p>
+      </div>
+      <div>
+        <h4>Busiest at this hour</h4>
+        <ul class="plain-list" id="placeList"></ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
     <h2>Your earnings activity</h2>
-    <p class="muted">Every rupee tracked on this account: when you earned it and where.</p>
+    <p class="muted">Every order on this account, synced from your delivery apps: when you
+       earned, where, and through which app.</p>
 
     <div class="stat-row">
       <div class="stat"><div class="metric-label">Today</div>
@@ -209,16 +242,13 @@
         <ul class="plain-list" id="zoneList"></ul>
         <p id="noZones" class="muted">No earnings tracked yet.</p>
 
-        <h4>Log an earning</h4>
-        <p class="muted">For money made outside the order feed - a cash tip, another app.</p>
-        <form id="earnForm" class="earn-form">
-          <input type="number" id="earnAmount" placeholder="Rs" min="1" max="100000" step="1" required />
-          <input id="earnNote" placeholder="Note (optional)" maxlength="80" />
-          <button class="btn btn-primary" type="submit">Add</button>
-        </form>
+        <h4>Partner apps (7 days)</h4>
+        <p class="muted" id="syncNote">Orders are picked up automatically from your delivery
+           apps - nothing to enter by hand.</p>
+        <ul class="plain-list" id="platformList"></ul>
 
-        <h4>Latest entries</h4>
-        <ul class="plain-list" id="recentList"></ul>
+        <h4>Latest orders</h4>
+        <ul class="plain-list recent-list" id="recentList"></ul>
       </div>
     </div>
   </section>

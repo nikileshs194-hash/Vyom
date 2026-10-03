@@ -13,6 +13,9 @@ from data import VEHICLE_COST_PER_KM
 
 MOVE_THRESHOLD = 1.08  # a move must beat staying put by 8% to be worth recommending
 PLANNING_HORIZON_HOURS = 1.5
+SURGE_HORIZON_HOURS = 4.0  # a known surge is worth planning further ahead for
+SURGE_PAY = 2.0  # surge pricing on orders around the busy place
+SURGE_WAIT_MIN = 1.0  # orders come back to back there
 
 # ---------- deterministic tools ----------
 
@@ -66,6 +69,7 @@ def demand_agent(zones):
                 "traffic_factor": z["traffic"],
                 "rain_mm": z["rain"],
                 "incentive": z["incentive"],
+                "busy_place": z["busy_place"],
             }
         )
     return results
@@ -99,7 +103,11 @@ def optimization_agent(state, zones, vehicle, current_zone_id, travel, snoozed=(
     there. `travel(a, b)` returns (minutes, km) in current traffic."""
     demand_data = demand_agent(zones)
     earnings_data = earnings_agent(state)
-    horizon = min(max(earnings_data["remaining_hours"], 0.5), PLANNING_HORIZON_HOURS)
+    surge_on = any(d["busy_place"] for d in demand_data)
+    horizon = min(
+        max(earnings_data["remaining_hours"], 0.5),
+        SURGE_HORIZON_HOURS if surge_on else PLANNING_HORIZON_HOURS,
+    )
 
     candidates = []
     for zone, d in zip(zones, demand_data):
@@ -115,6 +123,8 @@ def optimization_agent(state, zones, vehicle, current_zone_id, travel, snoozed=(
             avg_net, avg_eta = hist_net, hist_eta
         # search/wait time between orders shrinks as demand rises
         wait_min = min(max(9 / max(d["multiplier"], 0.05), 2.5), 40)
+        if d["busy_place"]:
+            avg_net, avg_eta, wait_min = hist_net * SURGE_PAY, hist_eta, SURGE_WAIT_MIN
         cycle_min = wait_min + avg_eta
         rate = avg_net * 60 / cycle_min
 
@@ -148,6 +158,7 @@ def optimization_agent(state, zones, vehicle, current_zone_id, travel, snoozed=(
                 "rain_mm": d["rain_mm"],
                 "open_orders": len(zone["open_orders"]),
                 "incentive_note": incentive_note,
+                "busy_place": d["busy_place"],
                 "score": round(score, 1),
             }
         )
@@ -229,6 +240,12 @@ def planning_agent(opt_result, current_zone_id):
     )
     if best["incentive_note"]:
         trace.append(f"Active incentive in this zone: {best['incentive_note']}")
+    busy = next((c for c in ranked if c["busy_place"]), None)
+    if busy:
+        trace.append(
+            f"Busy place alert: {busy['busy_place']} ({busy['zone_name']} zone) - "
+            f"Rs {busy['expected_rate']}/hr, {busy['travel_penalty_min']} min away"
+        )
     trace.append(f"Decision confidence: {opt_result['confidence']}%")
 
     if best["zone_id"] == current_zone_id:
@@ -247,6 +264,8 @@ def planning_agent(opt_result, current_zone_id):
             f"here, which beats staying put even after the "
             f"~{best['travel_penalty_min']} min ride ({best['travel_km']:.1f} km)."
         )
+    if best["busy_place"]:
+        reason += f" {best['busy_place']} is the busy place right now - orders are surging there."
     if best["rain_mm"] >= 0.5:
         reason += " Rain there is pushing more people to order in."
     if best["incentive_note"]:
@@ -264,6 +283,7 @@ def planning_agent(opt_result, current_zone_id):
         "expected_rate": best["expected_rate"],
         "target_zone_id": best["zone_id"],
         "target_zone_name": best["zone_name"],
+        "busy_place": best["busy_place"],
     }
 
 

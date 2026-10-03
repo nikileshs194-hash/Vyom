@@ -3,6 +3,7 @@ GigPilot - live data providers (all free, no account needed by default).
 
   Weather  Open-Meteo   current conditions + hourly forecast per zone
   Roads    OSRM         real road distance / drive time between zones
+  Places   Nominatim    name of the place at the rider's GPS position
   Traffic  TomTom       optional: only used if TOMTOM_API_KEY is set
 
 Every provider degrades to a built-in estimate if the network call fails,
@@ -10,7 +11,6 @@ so the demo keeps working offline. `status()` reports which one is in use.
 """
 
 import json
-import math
 import os
 import time
 from datetime import datetime
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import httpx
 
-from data import IST, ZONES, _bump, hour_of
+from data import IST, ZONES, _bump, haversine_km, hour_of
 
 OFFLINE = os.environ.get("GIGPILOT_OFFLINE") == "1"
 CACHE_DIR = Path(__file__).parent / "cache"
@@ -26,6 +26,7 @@ ROADS_CACHE = CACHE_DIR / "roads.json"
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 OSRM_URL = "https://router.project-osrm.org"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
 TOMTOM_URL = (
     "https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json"
 )
@@ -37,15 +38,6 @@ WEATHER_CODES = {
     81: "Showers", 82: "Heavy showers", 95: "Thunderstorm", 96: "Thunderstorm",
     99: "Thunderstorm",
 }  # fmt: skip
-
-
-def haversine_km(a, b):
-    lat1, lon1, lat2, lon2 = map(math.radians, (a["lat"], a["lon"], b["lat"], b["lon"]))
-    h = (
-        math.sin((lat2 - lat1) / 2) ** 2
-        + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
-    )
-    return 6371 * 2 * math.asin(math.sqrt(h))
 
 
 class Weather:
@@ -231,6 +223,48 @@ class Roads:
                     "detail": "real road distances"}  # fmt: skip
         return {"mode": "simulated", "source": "straight-line estimate",
                 "detail": "OSRM unreachable"}  # fmt: skip
+
+
+class Places:
+    """Turns a GPS position into a place name ("Medchal, Hyderabad") using
+    OpenStreetMap's Nominatim. Positions are rounded to about 100 m before
+    they are sent, results are cached, and calls are spaced out to respect
+    the service's one-request-per-second limit."""
+
+    MIN_SECONDS_BETWEEN_CALLS = 2
+
+    def __init__(self):
+        self.cache = {}
+        self.last_call = 0.0
+
+    def name(self, lat, lon):
+        key = (round(lat, 3), round(lon, 3))
+        if key in self.cache:
+            return self.cache[key]
+        if OFFLINE or time.time() - self.last_call < self.MIN_SECONDS_BETWEEN_CALLS:
+            return None
+        self.last_call = time.time()
+        try:
+            res = httpx.get(
+                NOMINATIM_URL,
+                params={"lat": key[0], "lon": key[1], "format": "jsonv2", "zoom": 16},
+                headers={"User-Agent": "GigPilot-hackathon-demo/1.0"},
+                timeout=6,
+            )
+            res.raise_for_status()
+            address = res.json().get("address", {})
+        except Exception:
+            return None
+        local_keys = ("neighbourhood", "suburb", "village", "town", "city_district", "road")
+        city_keys = ("city", "county", "state_district", "state")
+        local = next((address[k] for k in local_keys if address.get(k)), None)
+        city = next((address[k] for k in city_keys if address.get(k)), None)
+        name = ", ".join(dict.fromkeys(part for part in (local, city) if part)) or None
+        if name:
+            if len(self.cache) > 2000:
+                self.cache.clear()
+            self.cache[key] = name
+        return name
 
 
 class Traffic:
