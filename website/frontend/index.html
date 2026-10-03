@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>GigPilot - Agentic Earnings Optimization</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -12,19 +13,64 @@
   <div class="nav-inner">
     <span class="brand">GigPilot</span>
     <span class="tagline">Agentic AI for gig-worker earnings</span>
+    <span class="nav-right hidden" id="navUser">
+      <span class="nav-clock" id="navClock">--:--</span>
+      <span class="nav-name" id="navName"></span>
+      <button id="logoutBtn" class="btn btn-ghost">Log out</button>
+    </span>
   </div>
 </nav>
 
-<header class="hero">
-  <div class="hero-inner">
+<!-- ============================ logged out ============================ -->
+<section id="authView" class="auth-view hidden">
+  <div class="auth-intro">
     <h1>Stop guessing where to drive next.</h1>
-    <p>GigPilot watches demand, traffic and incentives in real time and tells you exactly
-       where to go to hit today's earnings goal - and explains why.</p>
-    <button id="launchBtn" class="btn btn-primary">Launch GigPilot</button>
+    <p>GigPilot watches demand, traffic, weather and incentives across Bengaluru in real
+       time, follows your real location, and tells you where to go to hit today's
+       earnings goal - and explains why.</p>
   </div>
-</header>
+  <form id="authForm" class="card auth-card" autocomplete="on">
+    <div class="tabs">
+      <button type="button" id="tabLogin" class="tab active">Log in</button>
+      <button type="button" id="tabRegister" class="tab">Create account</button>
+    </div>
+    <label>Username
+      <input id="authUsername" autocomplete="username" required minlength="3" maxlength="30"
+             pattern="[A-Za-z0-9_.\-]{3,30}" title="3-30 letters, numbers, dot, dash or underscore" />
+    </label>
+    <label id="authNameRow" class="hidden">Your name
+      <input id="authName" autocomplete="name" maxlength="60" />
+    </label>
+    <label>Password
+      <input id="authPassword" type="password" autocomplete="current-password"
+             required minlength="8" maxlength="128" />
+    </label>
+    <p id="authError" class="form-error hidden"></p>
+    <button id="authSubmit" class="btn btn-primary btn-lg" type="submit">Log in</button>
+    <p class="muted">Each account has its own goals, earnings history and location trail.</p>
+  </form>
+</section>
 
-<main id="appSection" class="app-section hidden">
+<!-- ============================ logged in ============================= -->
+<main id="appView" class="app-section hidden">
+
+  <section class="status-strip card">
+    <div class="chips" id="cityChips"></div>
+    <div class="sources" id="sourceBadges"></div>
+  </section>
+
+  <section class="card">
+    <h2>Your location</h2>
+    <p id="locStatus" class="loc-status">Waiting for your browser to share your location...</p>
+    <div class="loc-actions">
+      <button id="locateBtn" type="button" class="btn btn-secondary">Share my location</button>
+      <a id="locMapsLink" class="btn btn-secondary hidden" target="_blank" rel="noopener">
+        Open my location in Google Maps</a>
+      <label class="inline-label">or pick a zone by hand
+        <select id="manualZone"><option value="">-</option></select>
+      </label>
+    </div>
+  </section>
 
   <section class="goal-panel card">
     <h2>Today's Goal</h2>
@@ -34,7 +80,7 @@
                value="1000" min="100" max="5000" step="50" />
       </label>
       <label>Hours available
-        <input type="number" id="availableHours" value="5" min="1" max="12" step="0.5" />
+        <input type="number" id="availableHours" value="6" min="1" max="12" step="0.5" />
       </label>
       <label>Vehicle
         <select id="vehicle">
@@ -43,37 +89,61 @@
           <option value="car">car</option>
         </select>
       </label>
-      <label>Time of day
-        <select id="hourBlock"></select>
-      </label>
-      <label>Earned so far (Rs)
-        <input type="number" id="earnedSoFar" value="620" min="0" max="5000" step="10" />
+      <label>Earned so far today (Rs)
+        <input type="number" id="earnedSoFar" value="0" min="0" max="5000" step="10" />
       </label>
       <label>Hours already worked
-        <input type="number" id="hoursElapsed" value="2.5" min="0" max="12" step="0.5" />
+        <input type="number" id="hoursElapsed" value="0" min="0" max="12" step="0.5" />
       </label>
     </div>
     <button id="startBtn" class="btn btn-primary">Start / Update Goal</button>
+    <button id="endBtn" class="btn btn-secondary hidden">End shift</button>
     <span id="statusBadge" class="badge badge-waiting">WAITING FOR GOAL</span>
   </section>
 
-  <section id="dashboard" class="dashboard hidden">
-
+  <div id="kpis" class="hidden">
     <div class="metrics-row">
       <div class="metric card"><div class="metric-label">Earned so far</div>
-        <div class="metric-value" id="mEarned">-</div></div>
+        <div class="metric-value" id="mEarned">-</div>
+        <div class="metric-sub" id="mProgress">-</div></div>
       <div class="metric card"><div class="metric-label">Time remaining</div>
-        <div class="metric-value" id="mTime">-</div></div>
-      <div class="metric card"><div class="metric-label">Current zone</div>
-        <div class="metric-value" id="mZone">-</div></div>
-      <div class="metric card"><div class="metric-label">Progress</div>
-        <div class="metric-value" id="mProgress">-</div></div>
+        <div class="metric-value" id="mTime">-</div>
+        <div class="metric-sub" id="mOrders">-</div></div>
+      <div class="metric card"><div class="metric-label">Pace now</div>
+        <div class="metric-value" id="mPace">-</div>
+        <div class="metric-sub" id="mPaceNeeded">-</div></div>
+      <div class="metric card"><div class="metric-label">Projected by shift end</div>
+        <div class="metric-value" id="mProjected">-</div>
+        <div class="metric-sub" id="mProjectedSub">-</div></div>
+      <div class="metric card metric-wide"><div class="metric-label">Status</div>
+        <div class="metric-value metric-text" id="mZone">-</div>
+        <div class="metric-sub" id="mStatus">-</div></div>
     </div>
     <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+  </div>
 
-    <div class="two-col">
-      <div class="card">
-        <h2>GigPilot Recommendation</h2>
+  <div class="map-col">
+    <div class="card">
+      <h2>Live city map</h2>
+      <p class="muted">Click a zone for Google Maps directions to it, or click anywhere
+         else on the map to open that spot in Google Maps.</p>
+      <div id="map"></div>
+      <div class="map-legend">
+        <span class="legend-title">Demand</span>
+        <span class="legend-chip"><i class="lv1"></i>Low</span>
+        <span class="legend-chip"><i class="lv2"></i></span>
+        <span class="legend-chip"><i class="lv3"></i></span>
+        <span class="legend-chip"><i class="lv4"></i>Very high</span>
+        <span class="legend-chip"><i class="ring ring-target"></i>Recommended</span>
+        <span class="legend-chip"><i class="ring ring-incentive"></i>Incentive</span>
+        <span class="legend-chip"><i class="you-dot"></i>You</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>GigPilot Recommendation</h2>
+      <div id="recEmpty" class="muted">Set your goal above to get a live recommendation.</div>
+      <div id="recBody" class="hidden">
         <h3 id="recAction">-</h3>
         <p id="recReason">-</p>
         <div class="confidence-bar"><div id="confFill" class="confidence-fill"></div>
@@ -81,62 +151,142 @@
         <div class="btn-row">
           <button id="acceptBtn" class="btn btn-primary">Accept</button>
           <button id="ignoreBtn" class="btn btn-secondary">Ignore</button>
+          <button id="cancelMoveBtn" class="btn btn-secondary hidden">Cancel move</button>
         </div>
-        <details class="trace">
+        <a id="recMapsLink" class="maps-link" target="_blank" rel="noopener">
+          Open route in Google Maps</a>
+        <p id="lastEvent" class="event-banner hidden"></p>
+        <details class="trace" open>
           <summary>Decision trace</summary>
           <ul id="traceList"></ul>
         </details>
       </div>
+    </div>
+  </div>
 
-      <div class="card">
-        <h2>Live Replanning Demo</h2>
-        <p class="muted">Trigger a live condition change and watch GigPilot replan.</p>
-        <label>Target zone for event
-          <select id="eventZone"></select>
-        </label>
-        <div class="btn-col">
-          <button id="trafficBtn" class="btn btn-warning">Simulate traffic spike</button>
-          <button id="incentiveBtn" class="btn btn-success">
-            Simulate incentive activation</button>
-          <button id="resetBtn" class="btn btn-secondary">Reset all zone conditions</button>
+  <section class="card">
+    <h2>Your earnings activity</h2>
+    <p class="muted">Every rupee tracked on this account: when you earned it and where.</p>
+
+    <div class="stat-row">
+      <div class="stat"><div class="metric-label">Today</div>
+        <div class="stat-value" id="aToday">-</div></div>
+      <div class="stat"><div class="metric-label">Last 7 days</div>
+        <div class="stat-value" id="aWeek">-</div></div>
+      <div class="stat"><div class="metric-label">Best hour (7 days)</div>
+        <div class="stat-value" id="aBest">-</div></div>
+      <div class="stat"><div class="metric-label">Slowest hour (7 days)</div>
+        <div class="stat-value" id="aSlow">-</div></div>
+    </div>
+
+    <div class="activity-cols">
+      <div>
+        <h4>Daily activity</h4>
+        <div class="heat-scroll">
+          <div class="daygrid-wrap">
+            <div class="daygrid-months" id="dayMonths"></div>
+            <div class="daygrid-body">
+              <div class="daygrid-days"><span>Mon</span><span></span><span>Wed</span>
+                <span></span><span>Fri</span><span></span><span></span></div>
+              <div class="daygrid" id="dayGrid"></div>
+            </div>
+          </div>
         </div>
-        <p id="lastEvent" class="event-banner hidden"></p>
 
-        <h3 class="sub">Zone comparison (expected Rs/hour)</h3>
-        <table class="data-table">
-          <thead><tr><th>Zone</th><th>Demand</th><th>Rs/hr (low-high)</th></tr></thead>
-          <tbody id="zoneCompareBody"></tbody>
-        </table>
+        <h4>When you earn - hour by hour, last 7 days</h4>
+        <div class="heat-scroll">
+          <div class="hourgrid" id="hourGrid"></div>
+        </div>
+
+        <div class="heat-legend">Less
+          <i class="lv0"></i><i class="lv1"></i><i class="lv2"></i><i class="lv3"></i><i class="lv4"></i>
+          More</div>
+        <p class="muted" id="aMarket"></p>
+      </div>
+
+      <div>
+        <h4>Where you earned (7 days)</h4>
+        <ul class="plain-list" id="zoneList"></ul>
+        <p id="noZones" class="muted">No earnings tracked yet.</p>
+
+        <h4>Log an earning</h4>
+        <p class="muted">For money made outside the order feed - a cash tip, another app.</p>
+        <form id="earnForm" class="earn-form">
+          <input type="number" id="earnAmount" placeholder="Rs" min="1" max="100000" step="1" required />
+          <input id="earnNote" placeholder="Note (optional)" maxlength="80" />
+          <button class="btn btn-primary" type="submit">Add</button>
+        </form>
+
+        <h4>Latest entries</h4>
+        <ul class="plain-list" id="recentList"></ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="dashboard" class="dashboard hidden">
+
+    <div class="two-col">
+      <div class="card">
+        <h2>Demand outlook - next 12 hours</h2>
+        <p class="muted">Darker = busier. From order history and the real weather forecast.</p>
+        <div class="heat-scroll"><div class="outlook" id="outlook"></div></div>
+      </div>
+      <div class="card">
+        <h2>Zone comparison</h2>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr><th>Zone</th><th>Demand</th><th>Rs/hr (low-high)</th>
+              <th>Ride</th><th>Orders</th></tr></thead>
+            <tbody id="zoneCompareBody"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
     <div class="two-col">
       <div class="card">
+        <h2>Live feed</h2>
+        <ul id="feed" class="feed"></ul>
+        <p id="noFeed" class="muted">Nothing has happened yet.</p>
+      </div>
+      <div class="card">
         <h2>Recommendation history</h2>
-        <table class="data-table">
-          <thead><tr>
-            <th>Time</th><th>Action</th><th>Outcome</th><th>Confidence</th>
-          </tr></thead>
-          <tbody id="historyBody"></tbody>
-        </table>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr>
+              <th>Time</th><th>Action</th><th>Outcome</th><th>Confidence</th>
+            </tr></thead>
+            <tbody id="historyBody"></tbody>
+          </table>
+        </div>
         <p id="noHistory" class="muted">No recommendations acted on yet.</p>
       </div>
-
-      <div class="card">
-        <h2>Weekly summary</h2>
-        <p><strong>Best earning window:</strong> <span id="wBestWindow">-</span></p>
-        <p><strong>Best-performing zone:</strong> <span id="wBestZone">-</span></p>
-        <p><strong>Average net earning rate:</strong>
-           Rs <span id="wAvgRate">-</span>/hour</p>
-        <p class="muted" id="wNote"></p>
-      </div>
     </div>
+
+    <details class="card demo-tools">
+      <summary>Demo tools - simulated events</summary>
+      <p class="muted">These inject a made-up event so you can watch GigPilot replan.
+         They are the only part of the page that is not real or partner data.</p>
+      <label>Zone
+        <select id="eventZone"></select>
+      </label>
+      <div class="btn-row">
+        <button id="trafficBtn" class="btn btn-secondary">Traffic spike</button>
+        <button id="incentiveBtn" class="btn btn-secondary">Incentive</button>
+        <button id="rainBtn" class="btn btn-secondary">Heavy rain</button>
+        <button id="resetBtn" class="btn btn-secondary">Clear demo events</button>
+      </div>
+    </details>
 
   </section>
 </main>
 
-<footer class="footer">GigPilot - built for AI HACK X MRDU 2026</footer>
+<div id="toast" class="toast hidden"></div>
 
+<footer class="footer">GigPilot - built for AI HACK X MRDU 2026 &middot;
+  Weather by Open-Meteo &middot; Roads by OSRM &amp; OpenStreetMap contributors</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -2,11 +2,26 @@
 GigPilot - smoke test for the backup Streamlit app, driven headlessly.
 """
 
+import sys
 from pathlib import Path
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
-APP = str(Path(__file__).resolve().parents[1] / "backup_streamlit" / "app.py")
+BACKUP_DIR = Path(__file__).resolve().parents[1] / "backup_streamlit"
+APP = str(BACKUP_DIR / "app.py")
+
+
+@pytest.fixture(autouse=True)
+def backup_modules(monkeypatch):
+    """The backup has its own data.py / agents.py; make sure the app imports
+    those and not the website's modules of the same name."""
+    for name in ("data", "agents"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.syspath_prepend(str(BACKUP_DIR))
+    yield
+    for name in ("data", "agents"):
+        sys.modules.pop(name, None)
 
 
 def click(at, label):

@@ -1,38 +1,26 @@
 #!/bin/bash
-# Starts BOTH the backend and frontend of the GigPilot website with one command.
+# Starts the GigPilot website with one command. The backend serves both
+# the API and the site itself.
 # Usage:  bash start_website.sh
-# Stop everything with Ctrl+C.
+# Stop it with Ctrl+C.
 
 set -e
-cd "$(dirname "$0")/website"
+cd "$(dirname "$0")/website/backend"
 
 # On Windows "python3" is often a Microsoft Store stub, so fall back to "python".
 PY=python3
 if ! $PY --version > /dev/null 2>&1; then PY=python; fi
 
 echo "Installing backend requirements (safe to re-run)..."
-$PY -m pip install --quiet fastapi uvicorn
+$PY -m pip install --quiet fastapi uvicorn httpx
 
-echo "Starting backend on http://localhost:8000 ..."
-cd backend
-$PY -m uvicorn main:app --port 8000 > ../backend.log 2>&1 &
-BACKEND_PID=$!
-cd ..
-
-# Make sure the backend process is killed when this script exits.
-trap "echo 'Stopping backend...'; kill $BACKEND_PID 2>/dev/null" EXIT
-
-sleep 2
-
-echo "Starting frontend on http://localhost:5500 ..."
 echo ""
 echo "============================================================"
-echo "  Open this in your browser now:"
-echo "  http://localhost:5500/index.html"
+echo "  Open this in your browser once the server says it is up:"
+echo "  http://localhost:8000/"
 echo "============================================================"
 echo ""
-echo "Press Ctrl+C to stop both servers."
+echo "Press Ctrl+C to stop."
 echo ""
 
-cd frontend
-$PY -m http.server 5500
+$PY -m uvicorn main:app --port 8000
