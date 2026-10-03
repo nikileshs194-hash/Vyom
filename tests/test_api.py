@@ -453,6 +453,8 @@ def test_activity_grids(on_shift):
     assert a["days"][-1]["amount"] == a["today_total"] > 0
 
     assert [len(row["hours"]) for row in a["hourly"]] == [24] * 7
+    for row in a["hourly"]:  # an hour box has orders behind it exactly when it has money
+        assert [n > 0 for n in row["entries"]] == [amount > 0 for amount in row["hours"]]
     today = a["hourly"][-1]
     assert today["label"] == "Today"
     # each hour box is rounded on its own, so the row can be a rupee or two off
@@ -516,8 +518,11 @@ def test_live_orders_come_from_a_partner_app(on_shift):
     assert events and all(e.split()[0] in {"Swiggy", "Zomato", "Zepto", "Blinkit"} for e in events)
 
 
-def test_there_is_no_manual_entry(asha):
+def test_there_is_no_manual_entry(client, asha):
     assert asha.post("/api/earnings", {"amount": 75}).status_code in (404, 405)
+    page = client.get("/")
+    assert "Log an earning" not in page.text
+    assert page.headers["cache-control"] == "no-cache"  # browsers must not show a stale page
 
 
 def test_older_database_is_upgraded(tmp_path):

@@ -136,6 +136,16 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def always_serve_the_latest_page(request, call_next):
+    """Make browsers re-check the site's files on every load, so an old copy
+    of the page is never shown after an update."""
+    response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # ---------------- request bodies ----------------
 
 
@@ -622,10 +632,9 @@ def get_activity(user=Depends(current_user)):
             }
         )
 
-    cells = {
-        (r["day"], r["hour"]): r["amount"]
-        for r in db.earnings_by_day_hour(user["id"], week_start)
-    }
+    by_hour = db.earnings_by_day_hour(user["id"], week_start)
+    cells = {(r["day"], r["hour"]): r["amount"] for r in by_hour}
+    counts = {(r["day"], r["hour"]): r["entries"] for r in by_hour}
     hourly = []
     hour_totals = [0.0] * 24  # summed before rounding, so totals match the daily grid
     for i in range(7):
@@ -637,6 +646,7 @@ def get_activity(user=Depends(current_user)):
                 "date": day.isoformat(),
                 "label": "Today" if day == today else day.strftime("%a %d"),
                 "hours": [round(cells.get((day.isoformat(), h), 0)) for h in range(24)],
+                "entries": [counts.get((day.isoformat(), h), 0) for h in range(24)],
             }
         )
     worked = [h for h in range(24) if hour_totals[h] > 0]

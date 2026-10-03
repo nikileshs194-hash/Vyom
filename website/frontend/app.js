@@ -118,6 +118,46 @@ const rs = (n) => "Rs " + Math.round(n).toLocaleString("en-IN");
 const level = (value, max) => (value <= 0 || max <= 0 ? 0 : Math.min(4, Math.ceil((4 * value) / max)));
 const demandColor = (index) => LEVELS[Math.min(3, Math.floor(index / 0.45))];
 
+// Hover card for the activity boxes: shows at once, follows the pointer,
+// and opens on tap for touch screens.
+function setTip(box, title, sub) {
+  box.dataset.tip = title;
+  box.dataset.tipSub = sub;
+}
+function hourRange(h) {
+  const label = (x) => (x % 12 || 12) + (x % 24 < 12 ? " AM" : " PM");
+  return label(h) + " - " + label(h + 1);
+}
+function showTip(box, x, y) {
+  $("tipTitle").textContent = box.dataset.tip;
+  $("tipSub").textContent = box.dataset.tipSub;
+  const tip = $("tip");
+  tip.classList.remove("hidden");
+  const w = tip.offsetWidth;
+  const h = tip.offsetHeight;
+  tip.style.left = Math.max(8, Math.min(x - w / 2, window.innerWidth - w - 8)) + "px";
+  tip.style.top = (y - h - 14 < 8 ? y + 18 : y - h - 14) + "px";
+}
+function hideTip() {
+  $("tip").classList.add("hidden");
+  document.querySelectorAll(".tip-open").forEach((b) => b.classList.remove("tip-open"));
+}
+document.addEventListener("mousemove", (event) => {
+  const box = event.target.closest ? event.target.closest("[data-tip]") : null;
+  if (box) showTip(box, event.clientX, event.clientY);
+  else if (!document.querySelector(".tip-open")) hideTip();
+});
+document.addEventListener("click", (event) => {
+  const box = event.target.closest ? event.target.closest("[data-tip]") : null;
+  hideTip();
+  if (box) {
+    box.classList.add("tip-open");
+    const r = box.getBoundingClientRect();
+    showTip(box, r.left + r.width / 2, r.top);
+  }
+});
+window.addEventListener("scroll", hideTip, true);
+
 // Google Maps hand-off links
 function travelMode() {
   const vehicle = $("vehicle").value;
@@ -537,7 +577,7 @@ function renderShift(data) {
     outlook.appendChild(el("span", row.zone_name + (i === 0 ? " (you)" : ""), "row-label"));
     row.points.forEach((p) => {
       const box = el("i", "", "box lv" + level(p.value, peak));
-      box.title = row.zone_name + " at " + p.label + ": demand index " + p.value.toFixed(2);
+      setTip(box, "Demand " + p.value.toFixed(2), row.zone_name + " at " + p.label);
       outlook.appendChild(box);
     });
   });
@@ -695,7 +735,8 @@ async function refreshActivity() {
   let lastMonth = "";
   a.days.forEach((d, i) => {
     const box = el("i", "", "box lv" + level(d.amount, dayMax));
-    box.title = d.label + ": " + (d.amount ? rs(d.amount) + " in " + d.entries + " entries" : "nothing tracked");
+    setTip(box, d.amount ? rs(d.amount) : "No earnings",
+      d.label + (d.amount ? " · " + d.entries + " orders" : ""));
     dayGrid.appendChild(box);
     if (i % 7 === 0) {
       const month = d.label.split(" ")[2];
@@ -718,8 +759,9 @@ async function refreshActivity() {
     );
     row.hours.forEach((amount, h) => {
       const box = el("i", "", "box lv" + level(amount, hourMax));
-      const hour = String(h).padStart(2, "0") + ":00";
-      box.title = row.label + " " + hour + ": " + (amount ? rs(amount) : "nothing tracked");
+      const orders = row.entries[h];
+      setTip(box, amount ? rs(amount) : "No earnings",
+        row.label + ", " + hourRange(h) + (amount ? " · " + orders + " orders" : ""));
       hourGrid.appendChild(box);
     });
   });

@@ -280,7 +280,8 @@ def earnings_by_day(user_id, since):
 def earnings_by_day_hour(user_id, since):
     return _all(
         "SELECT substr(ts, 1, 10) AS day, CAST(substr(ts, 12, 2) AS INTEGER) AS hour, "
-        "SUM(amount) AS amount FROM earnings WHERE user_id = ? AND ts >= ? GROUP BY day, hour",
+        "SUM(amount) AS amount, COUNT(*) AS entries FROM earnings "
+        "WHERE user_id = ? AND ts >= ? GROUP BY day, hour",
         (user_id, stamp(since)),
     )
 
