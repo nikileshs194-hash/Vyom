@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS shifts (
     available_hours REAL NOT NULL,
     vehicle TEXT NOT NULL,
     base_earned REAL NOT NULL,
-    base_hours REAL NOT NULL
+    base_hours REAL NOT NULL,
+    state TEXT
 );
 CREATE TABLE IF NOT EXISTS earnings (
     id INTEGER PRIMARY KEY,
@@ -99,6 +100,7 @@ def _add_missing_columns():
     wanted = {
         "earnings": {"platform": "TEXT", "merchant": "TEXT", "distance_km": "REAL"},
         "users": {"synced": "INTEGER NOT NULL DEFAULT 0"},
+        "shifts": {"state": "TEXT"},
     }
     for table, columns in wanted.items():
         have = {row["name"] for row in _conn.execute(f"PRAGMA table_info({table})")}
@@ -198,6 +200,19 @@ def start_shift(user_id, goal, when):
          goal["vehicle"], goal["earned_so_far"], goal["hours_elapsed"]),
     )  # fmt: skip
     return cur.lastrowid
+
+
+def update_shift(shift_id, target_earnings, available_hours, vehicle):
+    """Change the goal of a shift that is already running."""
+    _run(
+        "UPDATE shifts SET target_earnings = ?, available_hours = ?, vehicle = ? WHERE id = ?",
+        (target_earnings, available_hours, vehicle, shift_id),
+    )
+
+
+def save_shift_state(shift_id, state):
+    """Remember what the rider is in the middle of, so a restart does not lose it."""
+    _run("UPDATE shifts SET state = ? WHERE id = ?", (state, shift_id))
 
 
 def end_shift(user_id, when):

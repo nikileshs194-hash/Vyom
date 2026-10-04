@@ -8,6 +8,7 @@ login token, and only ever returns that user's data.
 Run with:  uvicorn main:app --port 8000
 """
 
+import json
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -20,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
+import agent
 import assistant
 import db
 import partners
@@ -41,12 +43,14 @@ from world import World
 SNOOZE_MINUTES = 20  # how long an ignored zone stays out of the recommendations
 WEATHER_REFRESH_SECONDS = 600
 SERVICE_RADIUS_KM = 8  # further than this from every zone = outside the service area
+COARSE_FIX_METRES = 5000  # a fix this vague is a network guess, not GPS; it jumps around
 TRAIL_MIN_METRES = 30  # store a new location point only after moving this far...
 TRAIL_MAX_SECONDS = 120  # ...or after this long
 ACTIVITY_WEEKS = 18
 DEFAULT_ZONE = "MDP"
 
 WEATHER, ROADS, TRAFFIC, GEOCODER = Weather(), Roads(), Traffic(), Places()
+AGENT = agent.Agent()
 LOCK = threading.RLock()
 STOP = threading.Event()
 
@@ -61,6 +65,28 @@ def real_now():
 def record_earning(rider, amount, zone_id, kind, **details):
     db.add_earning(rider["user_id"], rider["shift_id"], WORLD.now, amount, zone_id, kind,
                    **details)  # fmt: skip
+
+
+def save_rider(rider):
+    """Store the order under way (and any accepted move) with the shift."""
+    progress = World.rider_progress(rider)
+    if progress["order"]:
+        progress["order"] = {**progress["order"], "expires": progress["order"]["expires"].isoformat()}
+        progress["busy_until"] = progress["busy_until"].isoformat()
+    db.save_shift_state(rider["shift_id"], json.dumps(progress))
+
+
+def saved_progress(shift):
+    try:
+        progress = json.loads(shift.get("state") or "null")
+        if progress and progress.get("order"):
+            progress["order"]["expires"] = datetime.fromisoformat(progress["order"]["expires"])
+            progress["busy_until"] = datetime.fromisoformat(progress["busy_until"])
+        if progress and progress.get("heading_to") not in ZONE_BY_ID:
+            progress["heading_to"] = None
+        return progress
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 def activity_start(now):
@@ -85,7 +111,8 @@ def reset_world(now=None, seed=None, db_path=None):
     with LOCK:
         db.init(db_path)
         POSITIONS.clear()
-        WORLD = World(WEATHER, ROADS, TRAFFIC, now=now, seed=seed, on_earning=record_earning)
+        WORLD = World(WEATHER, ROADS, TRAFFIC, now=now, seed=seed, on_earning=record_earning,
+                      on_rider_change=save_rider)
         for shift in db.active_shifts():
             shift["started_at"] = datetime.fromisoformat(shift["started_at"]).replace(tzinfo=IST)
             earned, orders = db.shift_totals(shift["id"])
@@ -97,6 +124,7 @@ def reset_world(now=None, seed=None, db_path=None):
                 last["zone_id"] if known else DEFAULT_ZONE,
                 earned=shift["base_earned"] + earned,
                 orders_done=orders,
+                resume=saved_progress(shift),
             )
 
 
@@ -167,6 +195,9 @@ class GoalIn(BaseModel):
     vehicle: Literal["bike", "scooter", "car"]
     earned_so_far: float = Field(ge=0)
     hours_elapsed: float = Field(ge=0)
+    # When changing the goal of a running shift: how many hours from NOW to keep working.
+    # "Set my goal to 800 in 1 hour" means one more hour, however long the shift has run.
+    hours_left: Optional[float] = Field(default=None, gt=0, le=24)
 
     @model_validator(mode="after")
     def elapsed_within_available(self):
@@ -328,6 +359,13 @@ def metrics_view(rider, rec):
         ),
         "required_pace": rec["earnings_data"]["required_rate_per_hour"],
         "projected_earnings": round(earned + rec["expected_rate"] * remaining),
+        "order_under_way": rider["order"]
+        and {
+            "platform": rider["order"]["platform"],
+            "net": round(partners.net_earning(rider["order"]["payout"],
+                                              rider["order"]["distance_km"], rider["vehicle"])),
+            "done": rider["busy_until"].strftime("%H:%M"),
+        },
     }
 
 
@@ -350,9 +388,14 @@ def position_view(user_id):
 
 
 def update_position(user, lat, lon, accuracy, manual):
+    previous = POSITIONS.get(user["id"])
+    coarse = not manual and accuracy is not None and accuracy > COARSE_FIX_METRES
+    if coarse and previous and not previous["manual"]:
+        # A network-based guess can land tens of km away from the last one. Once we have
+        # a position, keep it rather than let the rider hop between zones.
+        lat, lon, accuracy = previous["lat"], previous["lon"], previous["accuracy"]
     zone, distance = nearest_zone(lat, lon)
     now = real_now()
-    previous = POSITIONS.get(user["id"])
     saved = previous["saved"] if previous else None
     if not manual:
         moved = saved is None or haversine_km({"lat": lat, "lon": lon}, saved) * 1000
@@ -453,6 +496,33 @@ def set_location_zone(body: ZoneEventIn, user=Depends(current_user)):
 @app.post("/api/goal")
 def set_goal(goal: GoalIn, user=Depends(current_user)):
     with LOCK:
+        rider = WORLD.riders.get(user["id"])
+        if rider:
+            # A shift is running: change its goal in place. Earnings, orders delivered,
+            # pace and the time already worked all carry on.
+            worked = WORLD.hours_elapsed(rider)
+            over = rider["status"] == "shift_over"
+            total = goal.available_hours
+            if goal.hours_left is not None:
+                total = round(worked + goal.hours_left, 4)
+            if total > worked or not over:
+                if total < worked:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Hours available cannot be less than the {worked:.1f} hours "
+                        "already worked",
+                    )
+                rider.update(
+                    target_earnings=goal.target_earnings,
+                    available_hours=total,
+                    vehicle=goal.vehicle,
+                )
+                db.update_shift(rider["shift_id"], goal.target_earnings, total, goal.vehicle)
+                if over:  # more hours were added to a finished shift: carry on working
+                    rider["status"] = "idle"
+                    WORLD.log_rider(rider, "shift", "Shift extended")
+                WORLD._step_rider(rider)
+                return {"ok": True, "updated": True}
         shift = goal.model_dump()
         shift["id"] = db.start_shift(user["id"], shift, WORLD.now)
         shift.update(
@@ -852,16 +922,24 @@ def run_intent(user, intent):
                     "earned_so_far": 0, "hours_elapsed": 0}  # fmt: skip
         goal.update({k: intent[k] for k in ("target_earnings", "available_hours", "vehicle")
                      if k in intent})  # fmt: skip
+        if rider and "available_hours" in intent:
+            # hours in an instruction are counted from now, not from the start of the shift
+            goal["hours_left"] = intent["available_hours"]
+            goal["available_hours"] = rider["available_hours"]
         try:
             set_goal(GoalIn(**goal), user)
+        except HTTPException as exc:
+            return f"I could not set that goal. {exc.detail}.", []
         except ValidationError as exc:
             error = exc.errors()[0]
             field = str(error["loc"][-1]).replace("_", " ") + ": " if error["loc"] else ""
             reason = error["msg"].replace("Value error, ", "")
             return f"I could not set that goal. {field}{reason}.", []
-        rec = build_recommendation(WORLD.riders[uid])
+        current = WORLD.riders[uid]
+        left = round(current["available_hours"] - WORLD.hours_elapsed(current), 1)
+        rec = build_recommendation(current)
         return (
-            f"Goal set: {money(goal['target_earnings'])} in {goal['available_hours']:g} hours "
+            f"Goal set: {money(goal['target_earnings'])} in {left:g} hour{'' if left == 1 else 's'} "
             f"on a {goal['vehicle']}. My suggestion: {suggestion_text(rec)}",
             refresh,
         )
@@ -1020,16 +1098,221 @@ def run_intent(user, intent):
     return "Sorry, I did not catch that. " + assistant.HELP, []
 
 
+def tool_status(user):
+    """What the agent sees when it asks for the rider's current situation."""
+    uid = user["id"]
+    rider = WORLD.riders.get(uid)
+    pos = position_view(uid)
+    views = WORLD.zone_views(uid)
+    surge = WORLD.busy_place
+    status = {
+        "time": WORLD.now.strftime("%A %H:%M"),
+        "city": CITY,
+        "location": pos
+        and {
+            "place": pos["place"],
+            "nearest_zone": pos["zone_name"],
+            "km_from_zone": pos["distance_km"],
+            "inside_service_area": pos["in_service_area"],
+            "set_by_hand": pos["manual"],
+        },
+        "busy_place": surge and surge["place"]["name"],
+        "weather": {
+            "temperature_c": round(sum(v["temp"] for v in views) / len(views), 1),
+            "zones_with_rain": [v["name"] for v in views if v["rain"] >= 0.5],
+        },
+        "shift": None,
+    }
+    if rider:
+        rec = build_recommendation(rider)
+        status["shift"] = {**metrics_view(rider, rec), **rider_view(rider)}
+        status["recommendation"] = {
+            "action": rec["action"],
+            "reason": rec["reason"],
+            "expected_rs_per_hour": [rec["net_rate_low"], rec["net_rate_high"]],
+            "confidence_pct": rec["confidence"],
+            "already_answered": rec["decision"],
+        }
+    return status
+
+
+def execute_tool(user, name, args):
+    """Run one tool for the AI agent. Returns (result for the model, page actions)."""
+    with LOCK:
+        try:
+            return _execute_tool(user, name, args)
+        except HTTPException as exc:
+            return {"error": str(exc.detail)}, []
+
+
+def _execute_tool(user, name, args):
+    def via(intent):  # tools that map straight onto an assistant intent
+        reply, actions = run_intent(user, intent)
+        return {"result": reply}, actions
+
+    def zone_named(text):
+        return assistant.find_zone(assistant.normalise(str(text or "")))
+
+    def place_named(text):
+        return assistant.find_place(assistant.normalise(str(text or "")))
+
+    uid = user["id"]
+    rider = WORLD.riders.get(uid)
+
+    if name == "get_status":
+        return tool_status(user), []
+    if name == "set_goal":
+        wanted = {k: args[k] for k in ("target_earnings", "available_hours", "vehicle") if k in args}
+        return via({"intent": "set_goal", **wanted})
+    if name == "answer_recommendation":
+        if args.get("decision") not in ("accept", "ignore"):
+            return {"error": "decision must be accept or ignore"}, []
+        return via({"intent": args["decision"]})
+    if name in ("cancel_move", "end_shift", "clear_busy_place"):
+        return via({"intent": name})
+    if name == "log_out":
+        return via({"intent": "logout"})
+    if name == "set_busy_place":
+        place, zone = place_named(args.get("place")), zone_named(args.get("place"))
+        if not place and not zone:
+            return {"error": "No busy place by that name.",
+                    "known_places": [p["name"] for p in PLACES]}, []  # fmt: skip
+        return via({"intent": "set_busy_place", "place": place, "zone": zone})
+    if name == "list_busy_places":
+        limit = max(1, min(int(args.get("limit") or 8), len(PLACES)))
+        keep = ("name", "zone_name", "category", "busy_now", "active")
+        return {"places": [{k: p[k] for k in keep} for p in get_places(user)[:limit]]}, []
+    if name == "zone_info":
+        zone = zone_named(args.get("zone"))
+        if not zone:
+            return {"error": "No zone by that name.", "zones": [z["name"] for z in ZONES]}, []
+        return via({"intent": "zone_info", "zone": zone})
+    if name == "top_zones":
+        count = max(1, min(int(args.get("count") or 5), 10))
+        if rider:
+            ranked = build_recommendation(rider)["ranked_candidates"]
+            top = sorted(ranked, key=lambda c: -c["expected_rate"])[:count]
+            keep = ("zone_name", "demand_level", "expected_rate", "travel_penalty_min", "open_orders")
+            return {"zones": [{k: c[k] for k in keep} for c in top]}, []
+        views = sorted(WORLD.zone_views(uid), key=lambda v: -v["demand"])[:count]
+        return {
+            "note": "No shift running, so earnings estimates are not available.",
+            "zones": [{"zone_name": v["name"], "demand_level": demand_level(v["demand"]),
+                       "open_orders": len(v["open_orders"])} for v in views],
+        }, []  # fmt: skip
+    if name == "earnings_summary":
+        a = get_activity(user)
+        keep = ("today_total", "week_total", "active_days", "best_hour", "slowest_hour",
+                "platforms", "zones", "total_orders")  # fmt: skip
+        return {k: a[k] for k in keep}, []
+    if name == "recent_orders":
+        limit = max(1, min(int(args.get("limit") or 5), 20))
+        return {"orders": get_activity(user)["recent"][:limit]}, []
+    if name == "open_directions":
+        wanted = args.get("destination")
+        place, zone = place_named(wanted), zone_named(wanted)
+        if wanted and not place and not zone:
+            return {"error": "No zone or busy place by that name."}, []
+        return via({"intent": "navigate", "place": place, "zone": zone})
+    if name == "show_section":
+        if args.get("section") not in agent.SECTIONS:
+            return {"error": "Unknown section.", "sections": agent.SECTIONS}, []
+        return via({"intent": "show", "section": args["section"]})
+    if name == "simulate_event":
+        kind = args.get("kind")
+        if kind == "reset":
+            return via({"intent": "reset_events"})
+        zone = zone_named(args.get("zone"))
+        if kind not in ("traffic", "rain", "incentive") or not zone:
+            return {"error": "Needs kind (traffic, rain, incentive or reset) and a known zone."}, []
+        return via({"intent": kind, "zone": zone})
+    if name == "set_location":
+        zone = zone_named(args.get("zone"))
+        if not zone:
+            return {"error": "No zone by that name.", "zones": [z["name"] for z in ZONES]}, []
+        return via({"intent": "set_location", "zone": zone})
+    return {"error": f"Unknown tool '{name}'."}, []
+
+
+def intent_trace(intent):
+    """The rule-based assistant's one step, described the way the agent's tools are, so the
+    page can show it on screen in the same way."""
+    kind = intent["intent"]
+    named = lambda key: (intent.get(key) or {}).get("name")  # noqa: E731
+    steps = {
+        "set_goal": ("set_goal", {k: intent[k] for k in ("target_earnings", "available_hours",
+                                                          "vehicle") if k in intent}),
+        "accept": ("answer_recommendation", {"decision": "accept"}),
+        "ignore": ("answer_recommendation", {"decision": "ignore"}),
+        "cancel_move": ("cancel_move", {}),
+        "end_shift": ("end_shift", {}),
+        "set_busy_place": ("set_busy_place", {"place": named("place") or named("zone")}),
+        "clear_busy_place": ("clear_busy_place", {}),
+        "navigate": ("open_directions", {"destination": named("place") or named("zone")}),
+        "show": ("show_section", {"section": intent.get("section")}),
+        "traffic": ("simulate_event", {"kind": "traffic", "zone": named("zone")}),
+        "rain": ("simulate_event", {"kind": "rain", "zone": named("zone")}),
+        "incentive": ("simulate_event", {"kind": "incentive", "zone": named("zone")}),
+        "reset_events": ("simulate_event", {"kind": "reset"}),
+        "set_location": ("set_location", {"zone": named("zone")}),
+        "zone_info": ("zone_info", {"zone": named("zone")}),
+        "top_zones": ("top_zones", {}),
+        "recommendation": ("show_section", {"section": "recommendation"}),
+        "logout": ("log_out", {}),
+    }  # fmt: skip
+    for question in ("earnings", "week", "best_hour", "slowest_hour", "apps"):
+        steps[question] = ("earnings_summary", {})
+    for question in ("status", "time_left", "where_am_i", "weather"):
+        steps[question] = ("get_status", {})
+    if kind not in steps:
+        return []
+    tool, args = steps[kind]
+    return [{"tool": tool, "args": args, "ok": True}]
+
+
+def unique(actions):
+    seen = []
+    for action in actions:
+        if action not in seen:
+            seen.append(action)
+    return seen
+
+
+@app.get("/api/assistant/status")
+def assistant_status(user=Depends(current_user)):
+    """Which engine answers: the Gemini agent, or the built-in rules."""
+    return {"engine": "gemini" if AGENT.enabled() else "rules", "problem": AGENT.last_error}
+
+
+@app.post("/api/assistant/reset")
+def assistant_reset(user=Depends(current_user)):
+    AGENT.reset(user["id"])
+    return {"ok": True}
+
+
 @app.post("/api/assistant")
 def assistant_command(body: AssistantIn, user=Depends(current_user)):
-    """One typed or spoken instruction: understand it, do it, say what happened."""
+    """One typed or spoken instruction: understand it, do it, say what happened.
+    With a Gemini key the AI agent handles it; otherwise, or if Gemini fails,
+    the rule-based assistant does."""
+    problem = None
+    if AGENT.enabled():
+        try:  # the model call is slow, so it runs outside the lock; each tool locks itself
+            with LOCK:
+                status = tool_status(user)
+            reply, actions, trace = AGENT.run(user, body.text, execute_tool, status)
+            return {"heard": body.text, "engine": "gemini", "reply": reply,
+                    "actions": unique(actions), "trace": trace, "problem": None}  # fmt: skip
+        except agent.AgentError as exc:
+            problem = AGENT.last_error = str(exc)
     intent = assistant.parse(body.text)
     with LOCK:
         try:
             reply, actions = run_intent(user, intent)
         except HTTPException as exc:
             reply, actions = str(exc.detail), []
-    return {"heard": body.text, "intent": intent["intent"], "reply": reply, "actions": actions}
+    return {"heard": body.text, "engine": "rules", "intent": intent["intent"], "reply": reply,
+            "actions": actions, "trace": intent_trace(intent), "problem": problem}  # fmt: skip
 
 
 # Serve the website itself too, so one server on port 8000 is enough.

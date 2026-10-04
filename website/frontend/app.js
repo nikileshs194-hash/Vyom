@@ -24,6 +24,8 @@ let timers = [];
 let watchId = null;
 let lastLocationSent = 0;
 let polling = false;
+let agentHold = false; // true while the agent is acting a step out on screen
+let goalEditing = false;
 let toastTimer = null;
 
 let map = null;
@@ -216,11 +218,12 @@ function signOut(message) {
   timers = [];
   if (watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(watchId);
   watchId = null;
-  closeAssistant();
-  $("asstLog").innerHTML = "";
-  $("asstChips").innerHTML = "";
+  resetAgent();
+  goalEditing = false;
   $("appView").classList.add("hidden");
   $("navUser").classList.add("hidden");
+  $("navLinks").classList.add("hidden");
+  $("navTagline").classList.remove("hidden");
   $("authView").classList.remove("hidden");
   ["dashboard", "kpis", "recBody", "endBtn"].forEach((id) => $(id).classList.add("hidden"));
   $("recEmpty").classList.remove("hidden");
@@ -237,6 +240,9 @@ async function enterApp() {
   $("authView").classList.add("hidden");
   $("appView").classList.remove("hidden");
   $("navUser").classList.remove("hidden");
+  $("navLinks").classList.remove("hidden");
+  $("navTagline").classList.add("hidden");
+  initAgent();
   initMap();
   if (map) map.invalidateSize();
   startLocationWatch();
@@ -483,6 +489,7 @@ function renderMap(data) {
 function renderStatus(data) {
   $("navClock").textContent = data.clock.date + "  " + data.clock.time;
   $("navName").textContent = data.user.name;
+  $("navAvatar").textContent = data.user.name.trim().charAt(0).toUpperCase();
 
   const city = data.city;
   const traffic =
@@ -508,11 +515,14 @@ function renderShift(data) {
   const m = data.metrics;
   const r = data.rider;
   $("mEarned").textContent = rs(m.earned_so_far);
-  $("mProgress").textContent = m.progress_pct + "% of " + rs(m.target_earnings) + " goal";
+  const coming = m.order_under_way;
+  $("mProgress").textContent =
+    m.progress_pct + "% of " + rs(m.target_earnings) + " goal" +
+    (coming ? " · +" + rs(coming.net) + " arriving " + coming.done : "");
   $("progressFill").style.width = m.progress_pct + "%";
   $("mTime").textContent = m.remaining_hours.toFixed(1) + " h";
   $("mOrders").textContent = r.orders_done + " orders delivered this shift";
-  $("mPace").textContent = m.current_pace === null ? "-" : rs(m.current_pace) + "/hr";
+  $("mPace").textContent = m.current_pace === null ? "Starting" : rs(m.current_pace) + "/hr";
   $("mPaceNeeded").textContent =
     m.required_pace === null ? "Shift time is up" : "Needs " + rs(m.required_pace) + "/hr for goal";
   $("mProjected").textContent = rs(m.projected_earnings);
@@ -533,6 +543,15 @@ function renderShift(data) {
   $("recReason").textContent = rec.reason;
   $("confFill").style.width = rec.confidence + "%";
   $("confLabel").textContent = "Confidence: " + rec.confidence + "%";
+  const best = rec.ranked_candidates.find((c) => c.zone_id === rec.target_zone_id);
+  const chips = $("recChips");
+  chips.innerHTML = "";
+  [
+    "Rs " + rec.net_rate_low + "-" + rec.net_rate_high + " / hr",
+    best.travel_penalty_min ? best.travel_penalty_min + " min ride" : "You are here",
+    best.demand_level.toLowerCase() + " demand",
+    best.open_orders + " open orders",
+  ].forEach((text) => chips.appendChild(el("span", text, "rec-chip")));
   // once answered, the buttons give way to the answer until the suggestion changes
   const answered = Boolean(rec.decision) || r.status === "shift_over";
   $("acceptBtn").classList.toggle("hidden", answered);
@@ -612,6 +631,7 @@ function render(data) {
     $(id).classList.toggle("hidden", !data.started)
   );
   $("recEmpty").classList.toggle("hidden", data.started);
+  renderGoalCard(data);
   if (data.started) {
     renderShift(data);
     renderFeed(data);
@@ -619,8 +639,41 @@ function render(data) {
   }
 }
 
-async function poll() {
-  if (polling || !token) return;
+// With a shift running, the goal card shrinks to one line until "Edit goal" is pressed.
+function renderGoalCard(data) {
+  const summary = data.started && !goalEditing;
+  // while a shift runs, only the target, hours and vehicle can change
+  $("goalForm").classList.toggle("shift-running", data.started);
+  $("startBtn").textContent = data.started ? "Update goal" : "Start shift";
+  $("hoursLabel").textContent = data.started ? "Hours left from now" : "Hours available";
+  $("goalSummary").classList.toggle("hidden", !data.started);
+  $("goalForm").classList.toggle("hidden", summary);
+  $("goalEdit").classList.toggle("hidden", !summary);
+  if (data.started) {
+    const m = data.metrics;
+    $("goalSummaryText").textContent =
+      rs(m.target_earnings) + " goal · " + m.remaining_hours.toFixed(1) + " h left";
+  }
+}
+function setGoalEditing(on) {
+  goalEditing = on;
+  if (on && lastState && lastState.started) {
+    const m = lastState.metrics;
+    $("targetEarnings").value = m.target_earnings;
+    $("availableHours").value = m.remaining_hours; // while a shift runs, this is hours from now
+    $("earnedSoFar").value = 0;
+    $("hoursElapsed").value = 0;
+  }
+  if (lastState) renderGoalCard(lastState);
+}
+
+async function poll(force) {
+  if (!token || (agentHold && !force)) return;
+  if (polling) {
+    if (!force) return;
+    // a refresh is already on its way; wait for it, then fetch again so nothing is stale
+    while (polling) await new Promise((resolve) => setTimeout(resolve, 40));
+  }
   polling = true;
   try {
     render(await apiGet("/api/state", true));
@@ -836,22 +889,227 @@ async function refreshHistory() {
   });
 }
 
-// -------------------------------------------------------------- assistant
-// Type or speak an instruction; the backend works out what was meant, does
-// it, and replies. Voice uses the browser's own speech recognition.
+// ------------------------------------------------------------------ agent
+// Type or speak an instruction. The backend (a Gemini AI agent, or built-in
+// rules without a key) works out the steps and carries them out, and reports
+// each step back. The page then acts those steps out where the rider can see
+// them: a pointer travels to the field or button, types, presses, scrolls.
+// The work itself is already done on the server; this shows what was done.
 
-const ASSISTANT_SECTIONS = {
+const AGENT_SECTIONS = {
   map: "map", activity: "dayGrid", busy: "busyForm", history: "historyBody", feed: "feed",
-  zones: "zoneCompareBody", goal: "targetEarnings", recommendation: "recAction",
+  zones: "zoneCompareBody", goal: "goalCard", recommendation: "recAction",
 };
-const ASSISTANT_CHIPS = [
-  "Where should I go?", "Accept", "How much have I earned?", "Charminar is busy", "Help",
+const AGENT_CHIPS = [
+  "Set my goal to 1500 in 6 hours", "Where should I go?", "Charminar is busy, take me there",
+  "How much have I earned?",
 ];
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
 let listening = false;
+let agentSkip = false;
+let lastProblem = null;
+let replyTimer = null;
 
-function assistantSay(text, who, link) {
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, agentSkip ? 0 : ms));
+const isShown = (node) => Boolean(node) && node.offsetParent !== null;
+
+function setStep(text) {
+  $("agentStep").textContent = text;
+}
+
+// Bring an element into view, send the pointer to it and ring it.
+async function pointAt(node, label) {
+  if (!isShown(node)) return false;
+  setStep(label);
+  node.scrollIntoView({ behavior: agentSkip ? "auto" : "smooth", block: "center" });
+  await pause(480);
+  const box = node.getBoundingClientRect();
+  const cursor = $("agentCursor");
+  cursor.classList.remove("hidden");
+  cursor.style.transform =
+    "translate(" + (box.left + Math.min(box.width / 2, 70)) + "px, " +
+    (box.top + box.height / 2) + "px)";
+  await pause(620);
+  node.classList.add("agent-focus");
+  return true;
+}
+async function typeInto(node, value, label) {
+  if (!(await pointAt(node, label))) return;
+  node.value = "";
+  for (const ch of String(value)) {
+    node.value += ch;
+    await pause(34);
+  }
+  await pause(320);
+  node.classList.remove("agent-focus");
+}
+async function choose(node, value, label) {
+  if (!(await pointAt(node, label))) return;
+  node.value = value;
+  await pause(420);
+  node.classList.remove("agent-focus");
+}
+async function press(node, label) {
+  if (!(await pointAt(node, label))) return false;
+  node.classList.add("agent-press");
+  await pause(300);
+  node.classList.remove("agent-press", "agent-focus");
+  return true;
+}
+async function lookAt(node, label, ms) {
+  if (!(await pointAt(node, label))) return false;
+  await pause(ms || 1000);
+  node.classList.remove("agent-focus");
+  return true;
+}
+
+async function refreshAll() {
+  await poll(true);
+  refreshPlaces();
+  refreshActivity();
+  refreshHistory();
+}
+const zoneNamed = (name) =>
+  zones.find((z) => name && z.name.toLowerCase() === String(name).toLowerCase()) ||
+  zones.find((z) => name && String(name).toLowerCase().includes(z.name.toLowerCase()));
+
+// One tool the agent used -> the same thing acted out on the page.
+async function actOut(step) {
+  const a = step.args || {};
+  switch (step.tool) {
+    case "get_status":
+      await lookAt(isShown($("kpis")) ? $("kpis") : document.querySelector(".here-card"),
+        "Reading your current status", 800);
+      break;
+    case "set_goal":
+      if (isShown($("goalEdit"))) {
+        await press($("goalEdit"), "Opening the goal form");
+        setGoalEditing(true);
+      }
+      if (a.target_earnings !== undefined) {
+        await typeInto($("targetEarnings"), a.target_earnings, "Typing the target: Rs " + a.target_earnings);
+      }
+      if (a.available_hours !== undefined) {
+        await typeInto($("availableHours"), a.available_hours, "Setting the hours: " + a.available_hours);
+      }
+      if (a.vehicle) await choose($("vehicle"), a.vehicle, "Choosing the vehicle: " + a.vehicle);
+      await press($("startBtn"), "Pressing " + $("startBtn").textContent);
+      setGoalEditing(false);
+      await refreshAll();
+      break;
+    case "answer_recommendation": {
+      const accept = a.decision === "accept";
+      const pressed = await press($(accept ? "acceptBtn" : "ignoreBtn"),
+        accept ? "Accepting the recommendation" : "Ignoring the recommendation");
+      await refreshAll();
+      if (!pressed) await lookAt($("recAction"), "Recommendation answered", 700);
+      break;
+    }
+    case "cancel_move":
+      await press($("cancelMoveBtn"), "Cancelling the move");
+      await refreshAll();
+      break;
+    case "end_shift":
+      await press($("endBtn"), "Ending the shift");
+      await refreshAll();
+      break;
+    case "set_busy_place":
+      if (a.place) {
+        await typeInto($("busyInput"), a.place, "Typing the busy place: " + a.place);
+        await press(document.querySelector("#busyForm button[type=submit]"), "Pressing Set");
+        await refreshAll();
+        if (lastState && lastState.busy_place) $("busyInput").value = lastState.busy_place.name;
+        await lookAt($("busyActive"), "Busy place is set", 700);
+      } else {
+        await lookAt($("busyInput"), "Waiting for a busy place", 700);
+      }
+      break;
+    case "clear_busy_place":
+      await press($("busyClear"), "Clearing the busy place");
+      $("busyInput").value = "";
+      await refreshAll();
+      break;
+    case "list_busy_places":
+      await lookAt($("placeList"), "Reading the busiest places");
+      break;
+    case "zone_info": {
+      const zone = zoneNamed(a.zone);
+      await lookAt($("map"), "Finding " + (zone ? zone.name : "the zone") + " on the map", 500);
+      if (zone && map) {
+        map.flyTo([zone.lat, zone.lon], 13, { duration: agentSkip ? 0 : 0.8 });
+        await pause(900);
+        zoneMarkers[zone.id].openTooltip();
+        await pause(1500);
+        zoneMarkers[zone.id].closeTooltip();
+      }
+      break;
+    }
+    case "top_zones":
+      await lookAt($("zoneCompareBody").closest("table"), "Comparing the zones");
+      break;
+    case "earnings_summary":
+      await lookAt($("hourGrid"), "Reading your earnings activity");
+      break;
+    case "recent_orders":
+      await lookAt($("recentList"), "Reading your latest orders");
+      break;
+    case "open_directions":
+      await refreshAll();
+      if (!(await lookAt($("recMapsLink"), "Opening Google Maps directions", 800))) {
+        await lookAt($("map"), "Opening Google Maps directions", 800);
+      }
+      break;
+    case "show_section": {
+      const target = $(AGENT_SECTIONS[a.section]);
+      await lookAt(target && (target.closest(".card") || target), "Showing " + a.section);
+      break;
+    }
+    case "simulate_event": {
+      const tools = document.querySelector(".demo-tools");
+      if (tools) tools.open = true;
+      const zone = zoneNamed(a.zone);
+      if (zone) await choose($("eventZone"), zone.id, "Choosing " + zone.name);
+      const button = { traffic: "trafficBtn", rain: "rainBtn", incentive: "incentiveBtn", reset: "resetBtn" }[a.kind];
+      await press($(button), "Triggering the demo event");
+      await refreshAll();
+      break;
+    }
+    case "set_location":
+      await refreshAll();
+      await lookAt(document.querySelector(".here-card"), "Updating your location", 800);
+      break;
+    case "log_out":
+      await press($("logoutBtn"), "Logging out");
+      break;
+    default:
+      break;
+  }
+}
+
+async function actOutAll(trace) {
+  agentHold = true; // the page stays as it was until each step is shown
+  for (const step of trace) {
+    try {
+      await actOut(step);
+    } catch (err) { /* a missing element must not stop the remaining steps */ }
+  }
+  agentHold = false;
+  $("agentCursor").classList.add("hidden");
+  document.querySelectorAll(".agent-focus, .agent-press").forEach((n) =>
+    n.classList.remove("agent-focus", "agent-press")
+  );
+  await refreshAll();
+}
+
+function agentWorking(on) {
+  document.body.classList.toggle("agent-working", on);
+  $("agentBanner").classList.toggle("hidden", !on);
+  $("asstSend").disabled = on;
+  if (!on) $("agentCursor").classList.add("hidden");
+}
+
+function agentLog(text, who, link) {
   const msg = el("div", text, "asst-msg " + who);
   if (link) {
     msg.appendChild(el("br"));
@@ -865,6 +1123,27 @@ function assistantSay(text, who, link) {
   $("asstLog").scrollTop = $("asstLog").scrollHeight;
 }
 
+function showReply(text, link) {
+  const box = $("agentReply");
+  box.innerHTML = "";
+  box.appendChild(el("span", text));
+  if (link) {
+    const a = el("a", link.label);
+    a.href = link.url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    box.appendChild(a);
+  }
+  const close = el("button", "×", "asst-x");
+  close.type = "button";
+  close.setAttribute("aria-label", "Dismiss");
+  close.addEventListener("click", () => box.classList.add("hidden"));
+  box.appendChild(close);
+  box.classList.remove("hidden");
+  clearTimeout(replyTimer);
+  replyTimer = setTimeout(() => box.classList.add("hidden"), link ? 30000 : 14000);
+}
+
 function speak(text) {
   if (!$("asstSpeak").checked || !window.speechSynthesis) return;
   window.speechSynthesis.cancel();
@@ -873,73 +1152,108 @@ function speak(text) {
   window.speechSynthesis.speak(utterance);
 }
 
-async function assistantSend(text, spoken) {
+function showEngine(engine) {
+  const badge = $("asstEngine");
+  const ai = engine === "gemini";
+  badge.textContent = ai ? "AI · Gemini" : "Basic mode";
+  badge.classList.toggle("ai", ai);
+  badge.title = ai
+    ? "Instructions are understood and carried out by a Gemini AI agent"
+    : "Built-in rules. Add a Gemini key in website/backend/.env to turn on the AI agent";
+}
+
+async function agentRun(text) {
   text = text.trim();
-  if (!text) return;
-  assistantSay(text, "you");
+  if (!text || document.body.classList.contains("agent-working")) return;
+  agentSkip = false;
+  $("agentReply").classList.add("hidden");
+  $("asstChips").classList.add("hidden");
+  agentLog(text, "you");
+  setStep("Thinking about: " + text);
+  agentWorking(true);
+  agentHold = true; // freeze the page now, so changes appear only as each step is shown
   let result;
   try {
     result = await apiPost("/api/assistant", { text }, true);
   } catch (err) {
-    assistantSay("I could not reach GigPilot. Is the server running?", "bot");
+    agentHold = false;
+    agentWorking(false);
+    showReply("I could not reach GigPilot. Is the server running?");
     return;
   }
-  let link = null;
-  for (const action of result.actions) {
-    if (action.type === "refresh") {
-      await poll();
-      refreshPlaces();
-      refreshActivity();
-      refreshHistory();
-    } else if (action.type === "scroll") {
-      const target = $(ASSISTANT_SECTIONS[action.section]);
-      if (target) (target.closest(".card") || target).scrollIntoView({ behavior: "smooth", block: "center" });
-    } else if (action.type === "open_url") {
-      link = action;
-      window.open(action.url, "_blank", "noopener"); // may be blocked; the link below always works
-    } else if (action.type === "logout") {
-      setTimeout(() => $("logoutBtn").click(), 1200);
-    }
+  showEngine(result.engine);
+  if (result.problem && result.problem !== lastProblem) {
+    agentLog("The AI agent is unavailable right now (" + result.problem + "), so this was " +
+      "handled in basic mode.", "bot");
   }
-  assistantSay(result.reply, "bot", link);
-  if (spoken || $("asstSpeak").checked) speak(result.reply);
+  lastProblem = result.problem;
+
+  const link = result.actions.find((action) => action.type === "open_url") || null;
+  if (link) window.open(link.url, "_blank", "noopener"); // may be blocked; a link is shown too
+  if (result.trace.length) {
+    await actOutAll(result.trace);
+  } else {
+    agentHold = false;
+    const scroll = result.actions.find((action) => action.type === "scroll");
+    const target = scroll && $(AGENT_SECTIONS[scroll.section]);
+    if (target) (target.closest(".card") || target).scrollIntoView({ behavior: "smooth", block: "center" });
+    await refreshAll();
+  }
+  agentWorking(false);
+  agentLog(result.reply, "bot", link);
+  showReply(result.reply, link);
+  speak(result.reply);
+  if (result.actions.some((action) => action.type === "logout") &&
+      !result.trace.some((step) => step.tool === "log_out")) {
+    setTimeout(() => $("logoutBtn").click(), 1200);
+  } else if (result.trace.some((step) => step.tool === "log_out")) {
+    setTimeout(() => $("logoutBtn").click(), 900);
+  }
 }
 
-function openAssistant() {
-  $("asstPanel").classList.remove("hidden");
-  $("asstOpen").classList.add("hidden");
-  if (!$("asstLog").children.length) {
-    assistantSay(
-      "Hi! Tell me what to do - type it, or press the microphone and say it. " +
-        "Try: set my goal to 1500 in 6 hours.",
-      "bot"
-    );
-    ASSISTANT_CHIPS.forEach((text) => {
-      const chip = el("button", text, "asst-chip");
-      chip.type = "button";
-      chip.addEventListener("click", () => assistantSend(text, false));
-      $("asstChips").appendChild(chip);
-    });
-    if (!Recognition) {
-      $("asstMic").disabled = true;
-      $("asstMic").title = "Voice needs Chrome or Edge";
-    }
-  }
-  $("asstInput").focus();
-}
-function closeAssistant() {
+function resetAgent() {
   if (recognition && listening) recognition.stop();
   if (window.speechSynthesis) window.speechSynthesis.cancel();
-  $("asstPanel").classList.add("hidden");
-  $("asstOpen").classList.remove("hidden");
+  agentWorking(false);
+  agentHold = false;
+  $("asstLog").innerHTML = "";
+  $("agentSheet").classList.add("hidden");
+  $("agentReply").classList.add("hidden");
+  $("asstChips").classList.remove("hidden");
 }
-$("asstOpen").addEventListener("click", openAssistant);
-$("asstClose").addEventListener("click", closeAssistant);
+
+function initAgent() {
+  if (!$("asstChips").children.length) {
+    AGENT_CHIPS.forEach((text) => {
+      const chip = el("button", text, "asst-chip");
+      chip.type = "button";
+      chip.addEventListener("click", () => agentRun(text));
+      $("asstChips").appendChild(chip);
+    });
+  }
+  if (!Recognition) {
+    $("asstMic").disabled = true;
+    $("asstMic").title = "Voice needs Chrome or Edge";
+  }
+  apiGet("/api/assistant/status", true).then((status) => showEngine(status.engine)).catch(() => {});
+}
+
 $("asstForm").addEventListener("submit", (event) => {
   event.preventDefault();
   const text = $("asstInput").value;
   $("asstInput").value = "";
-  assistantSend(text, false);
+  agentRun(text);
+});
+$("agentStop").addEventListener("click", () => {
+  agentSkip = true; // finish the remaining steps at once
+});
+$("asstToggle").addEventListener("click", () => $("agentSheet").classList.toggle("hidden"));
+$("asstClose").addEventListener("click", () => $("agentSheet").classList.add("hidden"));
+$("asstNew").addEventListener("click", async () => {
+  try { await apiPost("/api/assistant/reset", undefined, true); } catch (err) { /* offline */ }
+  $("asstLog").innerHTML = "";
+  $("asstChips").classList.remove("hidden");
+  showReply("New chat started. What should I do?");
 });
 
 $("asstMic").addEventListener("click", () => {
@@ -964,36 +1278,54 @@ $("asstMic").addEventListener("click", () => {
   };
   recognition.onerror = (event) => {
     const denied = event.error === "not-allowed" || event.error === "service-not-allowed";
-    assistantSay(
+    showReply(
       denied
         ? "I need microphone permission to hear you. Allow it in the browser, or type instead."
-        : "I could not hear that. Try again, or type it.",
-      "bot"
+        : "I could not hear that. Try again, or type it."
     );
   };
   recognition.onend = () => {
     listening = false;
     $("asstMic").classList.remove("listening");
-    $("asstInput").placeholder = "Type or speak an instruction";
+    $("asstInput").placeholder = "Tell the agent what to do - it will work the screen for you";
     if (heard.trim()) {
       $("asstInput").value = "";
-      assistantSend(heard, true);
+      agentRun(heard);
     }
   };
   recognition.start();
 });
 
+// nav links scroll to their section
+document.querySelectorAll("[data-go]").forEach((button) =>
+  button.addEventListener("click", () => {
+    const target = $(button.dataset.go);
+    if (target) (target.closest(".card") || target).scrollIntoView({ behavior: "smooth", block: "start" });
+  })
+);
+
 // ---------------------------------------------------------------- actions
+
+$("goalEdit").addEventListener("click", () => setGoalEditing(true));
 
 $("startBtn").addEventListener("click", async () => {
   const num = (id) => parseFloat($(id).value);
-  await apiPost("/api/goal", {
+  const body = {
     target_earnings: num("targetEarnings"),
     available_hours: num("availableHours"),
     vehicle: $("vehicle").value,
     earned_so_far: num("earnedSoFar"),
     hours_elapsed: num("hoursElapsed"),
-  });
+  };
+  if (lastState && lastState.started) {
+    // changing a running shift: the hours typed are hours from now
+    body.hours_left = body.available_hours;
+    body.available_hours = lastState.metrics.available_hours;
+    body.earned_so_far = 0;
+    body.hours_elapsed = 0;
+  }
+  await apiPost("/api/goal", body);
+  goalEditing = false;
   await poll();
 });
 

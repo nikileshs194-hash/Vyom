@@ -43,8 +43,10 @@ def fuel_cost(distance_km, vehicle):
 
 
 class World:
-    def __init__(self, weather, roads, traffic, now=None, seed=None, on_earning=None):
+    def __init__(self, weather, roads, traffic, now=None, seed=None, on_earning=None,
+                 on_rider_change=None):  # fmt: skip
         self.weather, self.roads, self.live_traffic = weather, roads, traffic
+        self.on_rider_change = on_rider_change or (lambda rider: None)
         self.on_earning = on_earning or (lambda rider, amount, zone_id, kind, **details: None)
         self.rnd = random.Random(seed)
         # start a little early: the warm-up below advances to the requested time
@@ -217,8 +219,9 @@ class World:
 
     # ------------------------------------------------------------ the riders
 
-    def add_rider(self, user_id, shift, zone_id, earned=None, orders_done=0):
-        """`shift` is a row from the shifts table; started_at is a datetime."""
+    def add_rider(self, user_id, shift, zone_id, earned=None, orders_done=0, resume=None):
+        """`shift` is a row from the shifts table; started_at is a datetime. `resume` is
+        what the rider was in the middle of before a restart (see rider_progress)."""
         self.riders[user_id] = {
             "user_id": user_id,
             "shift_id": shift["id"],
@@ -240,9 +243,25 @@ class World:
             "decision": None,  # the rider's answer to the current suggestion
             "last_event": None,
             "events": deque(maxlen=30),
+            "saved": None,
         }
-        self._step_rider(self.riders[user_id])
-        return self.riders[user_id]
+        rider = self.riders[user_id]
+        if resume:
+            rider["heading_to"] = resume.get("heading_to")
+            if resume.get("order"):  # carry on with the order that was under way
+                rider["status"], rider["order"] = "on_order", resume["order"]
+                rider["busy_until"] = resume["busy_until"]
+        self._step_rider(rider)
+        return rider
+
+    @staticmethod
+    def rider_progress(rider):
+        """The part of a rider's state worth keeping across a restart."""
+        return {
+            "heading_to": rider["heading_to"],
+            "order": rider["order"],
+            "busy_until": rider["busy_until"] if rider["order"] else None,
+        }
 
     def remove_rider(self, user_id):
         self.riders.pop(user_id, None)
@@ -275,6 +294,13 @@ class World:
         self.on_earning(rider, amount, zone_id, kind, **details)
 
     def _step_rider(self, rider):
+        self._advance_rider(rider)
+        progress = (rider["status"], rider["heading_to"], rider["order"] and rider["order"]["id"])
+        if progress != rider["saved"]:
+            rider["saved"] = progress
+            self.on_rider_change(rider)
+
+    def _advance_rider(self, rider):
         if rider["status"] == "shift_over":
             return
         now = self.now

@@ -7,3 +7,4 @@ venv/
 gigpilot.db
 *.db-journal
 gigpilot-before-sync.db
+.env

@@ -19,6 +19,7 @@ os.environ["GIGPILOT_OFFLINE"] = "1"
 os.environ["GIGPILOT_DB"] = ":memory:"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "website" / "backend"))
 
+import agent  # noqa: E402
 import assistant  # noqa: E402
 import main  # noqa: E402
 from data import HISTORY, IST, PLACES, ZONE_BY_ID, ZONES  # noqa: E402
@@ -66,6 +67,8 @@ class Session:
 def client(monkeypatch):
     monkeypatch.setattr(main, "real_now", lambda: FRIDAY_7PM)
     main.reset_world(now=FRIDAY_7PM, seed=1, db_path=":memory:")
+    monkeypatch.setattr(main, "AGENT", agent.Agent())
+    main.AGENT.key = None  # tests never call the real Gemini service
     return TestClient(main.app)
 
 
@@ -172,6 +175,30 @@ def test_real_position_sets_the_zone_and_is_tracked(asha):
     assert data["metrics"]["current_zone_name"] == "Kondapur"
     assert data["trail"] == [[17.4401, 78.3489], [17.4622, 78.3568]]
     assert any("Kondapur" in e["text"] for e in data["my_events"])
+
+
+def test_vague_network_fix_does_not_move_the_rider(asha):
+    """A desktop without GPS reports a position good to ~50 km that jumps around."""
+    first = asha.post("/api/location", {**GACHIBOWLI, "accuracy": 50000}).json()
+    assert first["zone_name"] == "Gachibowli"  # the first fix is used: it is all we have
+    asha.post("/api/goal", GOAL)
+
+    far = asha.post("/api/location", {"lat": 17.725, "lon": 78.255, "accuracy": 50000}).json()
+    assert (far["zone_name"], far["in_service_area"]) == ("Gachibowli", True)
+    assert asha.state()["metrics"]["current_zone_name"] == "Gachibowli"
+    assert len(asha.state()["trail"]) == 1
+
+    precise = asha.post("/api/location", KONDAPUR).json()  # a real GPS fix still moves them
+    assert precise["zone_name"] == "Kondapur"
+
+
+def test_order_under_way_is_shown_before_it_pays(on_shift):
+    m = on_shift.state()["metrics"]
+    assert m["earned_so_far"] == 250 and m["current_pace"] is None
+    coming = m["order_under_way"]
+    assert coming and coming["net"] > 0 and coming["platform"] in {"Swiggy", "Zomato", "Zepto", "Blinkit"}
+    main.WORLD.advance(60)
+    assert on_shift.state()["metrics"]["earned_so_far"] >= 250 + coming["net"]
 
 
 def test_tiny_movements_do_not_flood_the_trail(asha):
@@ -352,6 +379,79 @@ def test_shift_ends_when_hours_run_out(asha):
     earned = data["metrics"]["earned_so_far"]
     main.WORLD.advance(60)
     assert asha.state()["metrics"]["earned_so_far"] == earned
+
+
+def test_changing_the_goal_keeps_the_shift_going(on_shift):
+    main.WORLD.advance(120)
+    before = on_shift.state()
+    assert before["rider"]["orders_done"] >= 2 and before["metrics"]["current_pace"] > 0
+
+    res = on_shift.post("/api/goal", {**GOAL, "target_earnings": 3000, "available_hours": 9,
+                                      "vehicle": "scooter"})  # fmt: skip
+    assert res.json() == {"ok": True, "updated": True}
+    after = on_shift.state()
+    m = after["metrics"]
+    # every place that shows the goal reflects the change...
+    assert (m["target_earnings"], m["available_hours"]) == (3000, 9)
+    assert m["remaining_hours"] == before["metrics"]["remaining_hours"] + 3
+    assert m["progress_pct"] == int(100 * m["earned_so_far"] / 3000)
+    assert m["required_pace"] == pytest.approx((3000 - m["earned_so_far"]) / m["remaining_hours"], abs=1)
+    assert "Goal: Rs 3000" in after["recommendation"]["decision_trace"][0]
+    # ...and nothing about the shift so far is lost
+    assert m["earned_so_far"] == before["metrics"]["earned_so_far"]
+    assert m["hours_elapsed"] == before["metrics"]["hours_elapsed"]
+    assert m["current_pace"] == before["metrics"]["current_pace"]
+    assert after["rider"]["orders_done"] == before["rider"]["orders_done"]
+    assert len(main.db.active_shifts()) == 1
+    assert main.db.active_shifts()[0]["target_earnings"] == 3000
+
+
+def test_goal_cannot_be_shorter_than_the_time_already_worked(on_shift):
+    main.WORLD.advance(120)  # 1.5 h before the shift + 2 h in it
+    res = on_shift.post("/api/goal", {**GOAL, "available_hours": 3})
+    assert res.status_code == 422
+    assert "3.5 hours already worked" in res.json()["detail"]
+    assert on_shift.state()["metrics"]["available_hours"] == 6
+
+
+def test_hours_in_an_instruction_count_from_now(on_shift):
+    """ "Set my goal to 564 in 1 hour", said 3.5 hours into a shift, means one more hour."""
+    main.WORLD.advance(120)
+    assert on_shift.state()["metrics"]["hours_elapsed"] == 3.5
+
+    reply = ask(on_shift, "set my goal to 564 in 1 hour")
+    assert reply["reply"].startswith("Goal set: Rs 564 in 1 hour on a bike.")
+    m = on_shift.state()["metrics"]
+    assert (m["target_earnings"], m["remaining_hours"]) == (564, 1.0)
+    assert m["available_hours"] == 4.5  # 3.5 worked + 1 to go
+    assert on_shift.state()["rider"]["orders_done"] >= 2  # the shift was not restarted
+
+    main.WORLD.advance(30)
+    assert on_shift.state()["metrics"]["remaining_hours"] == 0.5  # and it counts down
+
+    ask(on_shift, "change my target to 900")  # no hours mentioned: the end time stays put
+    m = on_shift.state()["metrics"]
+    assert (m["target_earnings"], m["remaining_hours"], m["available_hours"]) == (900, 0.5, 4.5)
+
+    # the goal form sends the same thing when a shift is running
+    on_shift.post("/api/goal", {**GOAL, "target_earnings": 700, "hours_left": 3})
+    m = on_shift.state()["metrics"]
+    assert (m["target_earnings"], m["remaining_hours"], m["available_hours"]) == (700, 3.0, 7.0)
+    assert on_shift.post("/api/goal", {**GOAL, "hours_left": 0}).status_code == 422
+
+
+def test_adding_hours_to_a_finished_shift_resumes_it(asha):
+    asha.post("/api/location", GACHIBOWLI)
+    asha.post("/api/goal", {**GOAL, "hours_elapsed": 5.5})
+    main.WORLD.advance(90)
+    assert asha.state()["rider"]["status"] == "shift_over"
+    earned = asha.state()["metrics"]["earned_so_far"]
+    asha.post("/api/goal", {**GOAL, "available_hours": 9})
+    main.WORLD.advance(60)
+    data = asha.state()
+    assert data["rider"]["status"] != "shift_over"
+    assert data["metrics"]["earned_so_far"] > earned
+    assert data["metrics"]["remaining_hours"] == pytest.approx(1.0, abs=0.1)
 
 
 def test_end_shift_keeps_the_history(on_shift):
@@ -560,10 +660,20 @@ def test_shift_survives_a_server_restart(client, on_shift, tmp_path):
     asha.post("/api/location", KONDAPUR)
     asha.post("/api/goal", GOAL)
     main.WORLD.advance(120)
+    for _ in range(40):  # make sure the restart happens in the middle of an order
+        if asha.state()["metrics"]["order_under_way"]:
+            break
+        main.WORLD.advance(1)
     before = asha.state()["metrics"]
+    before_status = asha.state()["rider"]["status_text"]
+
+    order_before = asha.state()["metrics"]["order_under_way"]
+    assert order_before, "expected an order to be under way after two hours"
 
     main.reset_world(now=main.WORLD.now, seed=5, db_path=path)
     after = asha.state()
+    assert after["metrics"]["order_under_way"] == order_before  # the same order carries on
+    assert after["rider"]["status_text"] == before_status
     assert after["started"] is True
     assert after["metrics"]["earned_so_far"] == before["earned_so_far"]
     assert after["metrics"]["current_zone_name"] == "Kondapur"
@@ -692,8 +802,176 @@ def test_assistant_answers_questions(on_shift):
 
 def test_assistant_reports_problems_instead_of_failing(on_shift):
     reply = ask(on_shift, "set my goal to 50000 in 30 hours")
-    assert reply["reply"].startswith("I could not set that goal. available hours:")
+    assert reply["reply"].startswith("I could not set that goal. hours left:")
     assert on_shift.state()["metrics"]["target_earnings"] == 1000  # nothing changed
     assert "did not catch that" in ask(on_shift, "sing me a song")["reply"]
     assert ask(on_shift, "something is busy")["reply"].startswith("Which place is busy?")
     assert on_shift.post("/api/assistant", {"text": "x" * 301}).status_code == 422
+
+
+# --------------------------------------------------------------- AI agent
+# The real model is replaced by a script of canned answers, so these check
+# GigPilot's side of the conversation: running tools, feeding results back,
+# keeping history, and falling back when Gemini is unavailable.
+
+
+def call(name, call_id="c1", **arguments):
+    return {"type": "function_call", "name": name, "id": call_id, "arguments": arguments}
+
+
+def model_says(text):
+    """A model turn that only speaks - the shape Gemini really returns."""
+    return {"status": "completed",
+            "steps": [{"type": "thought", "signature": "sig"},
+                      {"type": "model_output", "content": [{"type": "text", "text": text}]}]}  # fmt: skip
+
+
+@pytest.fixture
+def scripted(monkeypatch):
+    """Give the agent a key and a fake model that replays `turns` in order."""
+
+    def install(*turns):
+        queue, seen = list(turns), []
+
+        def fake_call(items):
+            seen.append([dict(i) for i in items])
+            turn = queue.pop(0)
+            if isinstance(turn, Exception):
+                raise turn
+            return turn
+
+        main.AGENT.key = "test-only-not-a-real-key"
+        monkeypatch.setattr(main.AGENT, "call", fake_call)
+        return seen
+
+    return install
+
+
+def test_agent_is_off_without_a_key(asha):
+    assert asha.get("/api/assistant/status").json() == {"engine": "rules", "problem": None}
+    assert ask(asha, "hello")["engine"] == "rules"
+
+
+def test_agent_chains_several_tools_for_one_instruction(asha, scripted):
+    asha.post("/api/location", GACHIBOWLI)
+    seen = scripted(
+        {"steps": [{"type": "thought", "signature": "abc"},
+                   call("set_goal", "c1", target_earnings=1500, available_hours=6)]},
+        {"steps": [call("set_busy_place", "c2", place="Charminar")]},
+        {"steps": [call("answer_recommendation", "c3", decision="accept"),
+                   call("open_directions", "c4")]},
+        model_says("Goal set, Charminar marked busy, and I accepted the move. Maps is open."),
+    )  # fmt: skip
+    reply = ask(asha, "set goal 1500 for 6 hours, charminar is packed, take me there")
+
+    assert reply["engine"] == "gemini"
+    assert reply["reply"].startswith("Goal set, Charminar marked busy")
+    state = asha.state()
+    assert state["metrics"]["target_earnings"] == 1500
+    assert state["busy_place"]["name"] == "Charminar"
+    assert state["rider"]["heading_to"] == "CHM"
+    assert state["recommendation"]["decision"]["outcome"] == "Accepted"
+    kinds = [a["type"] for a in reply["actions"]]
+    assert kinds.count("refresh") == 1 and "open_url" in kinds  # duplicates are merged
+    # the page gets every step in order, to act it out on screen
+    assert [t["tool"] for t in reply["trace"]] == [
+        "set_goal", "set_busy_place", "answer_recommendation", "open_directions"
+    ]
+    assert reply["trace"][0]["args"] == {"target_earnings": 1500, "available_hours": 6}
+    assert all(t["ok"] for t in reply["trace"])
+
+    # each tool result went back to the model, linked to its call, before the next turn
+    second_turn = seen[1]
+    words = "set goal 1500 for 6 hours, charminar is packed, take me there"
+    assert second_turn[0]["type"] == "user_input"
+    # the rider's words go out with a status snapshot, so the model need not ask for one
+    assert second_turn[0]["content"].startswith(words + "\n\n[GigPilot status right now: {")
+    assert '"nearest_zone": "Gachibowli"' in second_turn[0]["content"]
+    assert second_turn[1] == {"type": "thought", "signature": "abc"}  # model state passed back
+    assert second_turn[-1]["type"] == "function_result"
+    assert (second_turn[-1]["name"], second_turn[-1]["call_id"]) == ("set_goal", "c1")
+    assert "Goal set: Rs 1,500 in 6 hours" in second_turn[-1]["result"][0]["text"]
+    assert [i["call_id"] for i in seen[3] if i["type"] == "function_result"] == ["c1", "c2", "c3", "c4"]
+
+
+def test_agent_remembers_the_conversation(on_shift, scripted):
+    seen = scripted(model_says("Which place is busy?"), model_says("Done."))
+    ask(on_shift, "somewhere is busy")
+    ask(on_shift, "charminar")
+    contents = [i.get("content") for i in seen[1] if i["type"] == "user_input"]
+    assert contents[0] == "somewhere is busy"  # earlier turns are kept without their snapshot
+    assert contents[1].startswith("charminar\n\n[GigPilot status right now:")
+
+    on_shift.post("/api/assistant/reset")
+    seen = scripted(model_says("Hello."))
+    ask(on_shift, "hi")
+    assert len(seen[0]) == 1  # a new chat starts with no history
+
+
+def test_agent_tools_report_problems_to_the_model(on_shift, scripted):
+    seen = scripted(
+        {"steps": [call("set_busy_place", "c1", place="Atlantis"),
+                   call("zone_info", "c2", zone="Narnia"),
+                   call("no_such_tool", "c3")]},
+        model_says("I could not find those."),
+    )  # fmt: skip
+    ask(on_shift, "is atlantis busy")
+    results = [i["result"][0]["text"] for i in seen[1] if i["type"] == "function_result"]
+    assert "No busy place by that name" in results[0] and "Charminar" in results[0]
+    assert "No zone by that name" in results[1]
+    assert "Unknown tool" in results[2]
+    assert on_shift.state()["busy_place"] is None
+
+
+def test_rule_based_assistant_also_describes_its_step(on_shift):
+    assert ask(on_shift, "accept")["trace"] == [
+        {"tool": "answer_recommendation", "args": {"decision": "accept"}, "ok": True}
+    ]
+    goal = ask(on_shift, "change my target to 2000")["trace"][0]
+    assert (goal["tool"], goal["args"]) == ("set_goal", {"target_earnings": 2000})
+    busy = ask(on_shift, "charminar is busy")["trace"][0]
+    assert (busy["tool"], busy["args"]) == ("set_busy_place", {"place": "Charminar"})
+    assert ask(on_shift, "sing me a song")["trace"] == []
+
+
+def test_agent_status_tool_describes_the_rider(on_shift):
+    status, actions = main.execute_tool({"id": 1, "name": "Asha"}, "get_status", {})
+    assert actions == []
+    assert status["city"] == "Hyderabad"
+    assert status["location"]["nearest_zone"] == "Gachibowli"
+    assert status["shift"]["target_earnings"] == 1000
+    assert status["recommendation"]["confidence_pct"] >= 55
+    summary, _ = main.execute_tool({"id": 1, "name": "Asha"}, "earnings_summary", {})
+    assert summary["total_orders"] > 1000
+    places, _ = main.execute_tool({"id": 1, "name": "Asha"}, "list_busy_places", {"limit": 3})
+    assert len(places["places"]) == 3
+
+
+def test_agent_stops_a_model_that_never_finishes(on_shift, scripted):
+    scripted(*[{"steps": [call("get_status", f"c{i}")]} for i in range(agent.MAX_STEPS)])
+    reply = ask(on_shift, "loop forever")
+    assert reply["engine"] == "gemini"
+    assert reply["reply"].startswith("I did part of that but could not finish")
+
+
+def test_falls_back_to_rules_when_gemini_fails(on_shift, scripted):
+    scripted(agent.AgentError("Gemini returned 429 for gemini-3.8-flash: quota exceeded"))
+    reply = ask(on_shift, "how much have I earned")
+    assert reply["engine"] == "rules"
+    assert reply["reply"].startswith("You have earned Rs 250")
+    assert "429" in reply["problem"]
+    assert "429" in on_shift.get("/api/assistant/status").json()["problem"]
+
+
+def test_agent_tool_definitions_are_well_formed(asha):
+    names = [tool["name"] for tool in agent.TOOLS]
+    assert len(names) == len(set(names)) == 17
+    for tool in agent.TOOLS:
+        assert tool["type"] == "function" and tool["description"]
+        assert set(tool["parameters"]["required"]) <= set(tool["parameters"]["properties"])
+    for name in names:  # every declared tool is actually implemented
+        result, _ = main.execute_tool({"id": 1, "name": "Asha"}, name, {})
+        assert "Unknown tool" not in str(result)
+    assert agent.Agent._trim([{"type": "function_result"}, {"type": "user_input", "content": "a"}]) == [
+        {"type": "user_input", "content": "a"}
+    ]

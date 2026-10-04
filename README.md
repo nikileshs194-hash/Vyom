@@ -93,23 +93,45 @@ sales data.
 Once you Accept or Ignore a recommendation, GigPilot shows your answer
 instead of the buttons and only asks again when its suggestion changes.
 
-## Assistant (text and voice)
+## AI agent (text and voice)
 
-The **Assistant** button at the bottom right opens a chat panel. Type an
-instruction, or press the microphone and say it, and GigPilot carries it
-out on the page and replies (aloud, if "Speak replies" is ticked):
+A command bar is docked at the bottom of every page. Type an instruction,
+or press the microphone and say it, and the agent works the screen for
+you: a banner names each step while a pointer travels to the right field
+or button, types, presses and scrolls, and the page updates as it goes.
+It then replies in a card above the bar (and aloud, if "Speak replies" is
+ticked). **Skip** finishes the remaining steps at once. The speech-bubble
+button opens the full conversation.
 
-- "Set my goal to 1500 in 6 hours on a scooter" / "Change my target to 2000"
-- "Where should I go?" / "Accept" / "Ignore" / "Cancel the move"
-- "Charminar is busy" / "Clear the busy place"
-- "Directions to Kompally" / "Take me there" (opens Google Maps)
-- "How much have I earned?" / "What is my best hour?" / "Which app pays most?"
-- "Show the map" / "Show busy places" / "End my shift" / "Log out"
+The actions themselves are carried out on the server; the pointer shows
+what was done, in the order it was done.
 
-Instructions are understood by rules in `website/backend/assistant.py`, not
-by a paid AI service, so it works without any key and the same sentence
-always does the same thing. Voice uses the browser's own speech
-recognition, which needs Chrome or Edge and microphone permission.
+With a Google Gemini key it is a real AI agent: a language model is given
+17 tools - the same actions the page offers - and decides which to call,
+in what order, checking each result before the next step. So it handles
+free wording, several requests in one sentence ("set my goal to 1500 for
+6 hours, mark Charminar busy and take me there"), follow-up questions,
+and remembers the conversation. Every fact it states comes from a tool,
+not from the model's memory.
+
+**Turning it on (free):**
+
+1. Get a free key at https://aistudio.google.com/apikey
+2. Copy `website/backend/.env.example` to `website/backend/.env`
+3. Put the key after `GEMINI_API_KEY=` and restart the server
+
+The bar shows **AI - Gemini** when the agent is active and **Basic
+mode** otherwise. In basic mode, or if Gemini cannot be reached, the
+rule-based assistant in `assistant.py` answers instead: it understands a
+fixed set of instructions, one at a time, with no key needed.
+
+With the agent on, your instructions and the rider data it looks up
+(location name, earnings, recommendation) are sent to Google to produce
+the reply. Requests ask Google not to store them. The `.env` file is
+excluded from git, so the key is never uploaded.
+
+Voice uses the browser's own speech recognition, which needs Chrome or
+Edge and microphone permission.
 
 ## What's in this folder
 
@@ -122,7 +144,8 @@ GigPilot_Submission/
 │   │   ├── world.py        live city state (orders, traffic, riders' shifts)
 │   │   ├── live.py         live data providers (weather, roads, traffic)
 │   │   ├── db.py           SQLite: accounts, shifts, earnings, locations
-│   │   ├── assistant.py    understands typed and spoken instructions
+│   │   ├── agent.py        AI agent: Gemini with tools (optional, needs a free key)
+│   │   ├── assistant.py    rule-based fallback for typed and spoken instructions
 │   │   ├── places.py       busy places dataset for Hyderabad
 │   │   ├── partners.py     partner apps: which app an order came from, synced order history
 │   │   └── data.py         zones, demand model, generated order history

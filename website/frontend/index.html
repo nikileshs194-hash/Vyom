@@ -11,10 +11,18 @@
 
 <nav class="navbar">
   <div class="nav-inner">
-    <span class="brand">GigPilot</span>
-    <span class="tagline">Agentic AI for gig-worker earnings</span>
+    <span class="brand"><span class="brand-mark" aria-hidden="true"></span>GigPilot</span>
+    <span class="tagline" id="navTagline">Agentic AI for gig-worker earnings</span>
+    <span class="nav-links hidden" id="navLinks">
+      <button type="button" data-go="goalCard">Today</button>
+      <button type="button" data-go="map">Map</button>
+      <button type="button" data-go="busyForm">Busy places</button>
+      <button type="button" data-go="dayGrid">Activity</button>
+      <button type="button" data-go="zoneCompareBody">Zones</button>
+    </span>
     <span class="nav-right hidden" id="navUser">
       <span class="nav-clock" id="navClock">--:--</span>
+      <span class="nav-avatar" id="navAvatar" aria-hidden="true"></span>
       <span class="nav-name" id="navName"></span>
       <button id="logoutBtn" class="btn btn-ghost">Log out</button>
     </span>
@@ -28,6 +36,11 @@
     <p>GigPilot watches demand, traffic, weather and incentives across Hyderabad in real
        time, follows your real location, and tells you where to go to hit today's
        earnings goal - and explains why.</p>
+    <ul class="auth-points">
+      <li>Live map of 32 zones, shaded by demand</li>
+      <li>An AI agent that works the screen for you, by text or voice</li>
+      <li>Your earnings, hour by hour, tracked automatically</li>
+    </ul>
   </div>
   <form id="authForm" class="card auth-card" autocomplete="on">
     <div class="tabs">
@@ -79,14 +92,20 @@
     <div class="here-stats" id="cityChips"></div>
   </section>
 
-  <section class="goal-panel card">
+  <section class="goal-panel card" id="goalCard">
     <h2>Today's Goal</h2>
+    <div id="goalSummary" class="goal-summary hidden">
+      <div id="goalSummaryText" class="goal-summary-text"></div>
+      <button id="goalEdit" type="button" class="btn btn-secondary">Edit goal</button>
+      <button id="endBtn" class="btn btn-secondary hidden">End shift</button>
+    </div>
+    <div id="goalForm">
     <div class="goal-grid">
       <label>Target earnings (Rs)
         <input type="number" id="targetEarnings"
                value="1000" min="100" max="5000" step="50" />
       </label>
-      <label>Hours available
+      <label><span id="hoursLabel">Hours available</span>
         <input type="number" id="availableHours" value="6" min="1" max="12" step="0.5" />
       </label>
       <label>Vehicle
@@ -96,15 +115,15 @@
           <option value="car">car</option>
         </select>
       </label>
-      <label>Earned so far today (Rs)
+      <label class="new-shift-only">Earned so far today (Rs)
         <input type="number" id="earnedSoFar" value="0" min="0" max="5000" step="10" />
       </label>
-      <label>Hours already worked
+      <label class="new-shift-only">Hours already worked
         <input type="number" id="hoursElapsed" value="0" min="0" max="12" step="0.5" />
       </label>
     </div>
-    <button id="startBtn" class="btn btn-primary">Start / Update Goal</button>
-    <button id="endBtn" class="btn btn-secondary hidden">End shift</button>
+    <button id="startBtn" class="btn btn-primary">Start shift</button>
+    </div>
   </section>
 
   <div id="kpis" class="hidden">
@@ -153,6 +172,7 @@
       <div id="recBody" class="hidden">
         <h3 id="recAction">-</h3>
         <p id="recReason">-</p>
+        <div id="recChips" class="rec-chips"></div>
         <div class="confidence-bar"><div id="confFill" class="confidence-fill"></div>
           <span id="confLabel"></span></div>
         <div class="btn-row">
@@ -310,23 +330,24 @@
 
   </section>
 
-  <!-- assistant: type or speak an instruction and it is carried out on this page -->
-  <button id="asstOpen" class="asst-open" type="button" aria-label="Open the assistant">
-    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
-         stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M21 12a8 8 0 0 1-11.8 7L4 20l1.1-4.3A8 8 0 1 1 21 12z" />
-    </svg>
-    Assistant
-  </button>
-  <aside id="asstPanel" class="asst-panel hidden" aria-label="GigPilot assistant">
-    <header class="asst-head">
-      <strong>GigPilot Assistant</strong>
-      <label class="asst-speak"><input type="checkbox" id="asstSpeak" checked /> Speak replies</label>
-      <button id="asstClose" class="asst-x" type="button" aria-label="Close the assistant">&times;</button>
-    </header>
-    <div id="asstLog" class="asst-log" aria-live="polite"></div>
+  <!-- agent: type or speak an instruction and watch it carried out on this page -->
+  <div id="agentDock" class="agent-dock">
+    <div id="agentSheet" class="agent-sheet hidden">
+      <header class="agent-sheet-head">
+        <strong>Conversation</strong>
+        <label class="asst-speak"><input type="checkbox" id="asstSpeak" checked /> Speak replies</label>
+        <button id="asstNew" class="agent-link" type="button">New chat</button>
+        <button id="asstClose" class="asst-x" type="button" aria-label="Hide the conversation">&times;</button>
+      </header>
+      <div id="asstLog" class="asst-log" aria-live="polite"></div>
+    </div>
+    <div id="agentReply" class="agent-reply hidden" aria-live="polite"></div>
     <div class="asst-chips" id="asstChips"></div>
-    <form id="asstForm" class="asst-form">
+    <form id="asstForm" class="agent-bar">
+      <span class="agent-orb" aria-hidden="true"></span>
+      <input id="asstInput" placeholder="Tell the agent what to do - it will work the screen for you"
+             autocomplete="off" maxlength="300" aria-label="Instruction for the agent" />
+      <span id="asstEngine" class="asst-engine"></span>
       <button id="asstMic" class="asst-mic" type="button" aria-label="Speak an instruction">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -334,11 +355,29 @@
           <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
         </svg>
       </button>
-      <input id="asstInput" placeholder="Type or speak an instruction" autocomplete="off"
-             maxlength="300" />
-      <button class="btn btn-primary" type="submit">Send</button>
+      <button id="asstToggle" class="asst-mic" type="button" aria-label="Show the conversation">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12a8 8 0 0 1-11.8 7L4 20l1.1-4.3A8 8 0 1 1 21 12z" />
+        </svg>
+      </button>
+      <button class="btn btn-primary" type="submit" id="asstSend">Run</button>
     </form>
-  </aside>
+  </div>
+
+  <!-- what the rider sees while the agent works: a banner, a pointer, a glow -->
+  <div id="agentBanner" class="agent-banner hidden" role="status">
+    <span class="agent-orb working" aria-hidden="true"></span>
+    <span id="agentStep">Thinking...</span>
+    <button id="agentStop" type="button">Skip</button>
+  </div>
+  <div id="agentCursor" class="agent-cursor hidden" aria-hidden="true">
+    <svg viewBox="0 0 24 24" width="26" height="26">
+      <path d="M4 2l15 9-7 1.5L8.5 20z" fill="#0f2442" stroke="#ffffff" stroke-width="1.6"
+            stroke-linejoin="round" />
+    </svg>
+    <span>Agent</span>
+  </div>
 </main>
 
 <div id="tip" class="tip hidden" role="tooltip"><b id="tipTitle"></b><span id="tipSub"></span></div>
