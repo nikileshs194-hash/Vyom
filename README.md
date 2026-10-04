@@ -93,6 +93,24 @@ sales data.
 Once you Accept or Ignore a recommendation, GigPilot shows your answer
 instead of the buttons and only asks again when its suggestion changes.
 
+## Assistant (text and voice)
+
+The **Assistant** button at the bottom right opens a chat panel. Type an
+instruction, or press the microphone and say it, and GigPilot carries it
+out on the page and replies (aloud, if "Speak replies" is ticked):
+
+- "Set my goal to 1500 in 6 hours on a scooter" / "Change my target to 2000"
+- "Where should I go?" / "Accept" / "Ignore" / "Cancel the move"
+- "Charminar is busy" / "Clear the busy place"
+- "Directions to Kompally" / "Take me there" (opens Google Maps)
+- "How much have I earned?" / "What is my best hour?" / "Which app pays most?"
+- "Show the map" / "Show busy places" / "End my shift" / "Log out"
+
+Instructions are understood by rules in `website/backend/assistant.py`, not
+by a paid AI service, so it works without any key and the same sentence
+always does the same thing. Voice uses the browser's own speech
+recognition, which needs Chrome or Edge and microphone permission.
+
 ## What's in this folder
 
 ```
@@ -104,6 +122,7 @@ GigPilot_Submission/
 │   │   ├── world.py        live city state (orders, traffic, riders' shifts)
 │   │   ├── live.py         live data providers (weather, roads, traffic)
 │   │   ├── db.py           SQLite: accounts, shifts, earnings, locations
+│   │   ├── assistant.py    understands typed and spoken instructions
 │   │   ├── places.py       busy places dataset for Hyderabad
 │   │   ├── partners.py     partner apps: which app an order came from, synced order history
 │   │   └── data.py         zones, demand model, generated order history

@@ -19,6 +19,7 @@ os.environ["GIGPILOT_OFFLINE"] = "1"
 os.environ["GIGPILOT_DB"] = ":memory:"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "website" / "backend"))
 
+import assistant  # noqa: E402
 import main  # noqa: E402
 from data import HISTORY, IST, PLACES, ZONE_BY_ID, ZONES  # noqa: E402
 
@@ -96,7 +97,7 @@ def test_everything_needs_a_login(client):
     for path in ("/api/state", "/api/activity", "/api/history", "/api/me", "/api/places",
                  "/api/route?b=MDP"):  # fmt: skip
         assert client.get(path).status_code == 401
-    for path in ("/api/goal", "/api/accept", "/api/location", "/api/shift/end", "/api/busy-place",
+    for path in ("/api/goal", "/api/accept", "/api/location", "/api/shift/end", "/api/busy-place", "/api/assistant",
                  "/api/simulate/reset"):  # fmt: skip
         assert client.post(path, json={}).status_code == 401
     bad = {"Authorization": "Bearer not-a-real-token"}
@@ -582,3 +583,117 @@ def test_every_vehicle_gives_a_recommendation(asha, vehicle):
     rec = asha.state()["recommendation"]
     assert rec["net_rate_low"] <= rec["net_rate_high"]
     assert rec["action"].endswith(rec["target_zone_name"])
+
+
+# -------------------------------------------------------------- assistant
+
+
+def ask(session, text):
+    return session.post("/api/assistant", {"text": text}).json()
+
+
+@pytest.mark.parametrize(
+    "text, intent",
+    [
+        ("set my goal to 1500 in 6 hours", "set_goal"),
+        ("I want to earn 1200 in five hours on a scooter", "set_goal"),
+        ("start my shift", "set_goal"),
+        ("accept", "accept"),
+        ("ok go ahead", "accept"),
+        ("ignore that", "ignore"),
+        ("no", "ignore"),
+        ("cancel the move", "cancel_move"),
+        ("where should I go?", "recommendation"),
+        ("how much have I earned", "earnings"),
+        ("how much did I make this week", "week"),
+        ("what's my best hour", "best_hour"),
+        ("which app pays me most", "apps"),
+        ("Charminar is busy", "set_busy_place"),
+        ("there is a rush at Inorbit Mall", "set_busy_place"),
+        ("clear the busy place", "clear_busy_place"),
+        ("show busy places", "show"),
+        ("show me the map", "show"),
+        ("directions to Kompally", "navigate"),
+        ("take me there", "navigate"),
+        ("traffic in Medchal", "traffic"),
+        ("is it raining", "weather"),
+        ("how is Gachibowli", "zone_info"),
+        ("where am I", "where_am_i"),
+        ("end my shift", "end_shift"),
+        ("log out", "logout"),
+        ("hello", "greeting"),
+        ("sing me a song", "unknown"),
+        ("", "help"),
+    ],
+)
+def test_assistant_understands(text, intent):
+    assert assistant.parse(text)["intent"] == intent
+
+
+def test_assistant_pulls_out_the_details():
+    goal = assistant.parse("I want to earn 1,200 in five hours on a scooter")
+    assert (goal["target_earnings"], goal["available_hours"], goal["vehicle"]) == (1200, 5, "scooter")
+    assert assistant.parse("change my target to 2k")["target_earnings"] == 2000
+    assert assistant.parse("paradise biriyani is crowded")["place"]["id"] == "paradise"  # misspelt
+    assert assistant.parse("directions to Kompally")["zone"]["name"] == "Kompally"
+    assert assistant.parse("I always take the long road")["intent"] == "unknown"  # not "Alwal"
+
+
+def test_assistant_runs_a_whole_shift_by_instruction(asha):
+    asha.post("/api/location", GACHIBOWLI)
+    assert "Set a goal first" in ask(asha, "accept")["reply"]
+
+    reply = ask(asha, "set my goal to 1500 in 5 hours on a scooter")
+    assert reply["reply"].startswith("Goal set: Rs 1,500 in 5 hours on a scooter.")
+    assert {"type": "refresh"} in reply["actions"]
+    metrics = asha.state()["metrics"]
+    assert (metrics["target_earnings"], metrics["available_hours"]) == (1500, 5)
+
+    reply = ask(asha, "Charminar is busy")
+    assert "Charminar is now the busy place. Move to Charminar." in reply["reply"]
+    assert asha.state()["busy_place"]["name"] == "Charminar"
+
+    reply = ask(asha, "accept")
+    assert reply["reply"] == "Accepted: Move to Charminar."
+    link = next(a for a in reply["actions"] if a["type"] == "open_url")
+    assert link["url"].startswith("https://www.google.com/maps/dir/?api=1&destination=17.3616,78.4747")
+    assert "origin=17.4401,78.3489" in link["url"]  # from the rider's real position
+    state = asha.state()
+    assert state["rider"]["heading_to"] == "CHM"
+    assert state["recommendation"]["decision"]["outcome"] == "Accepted"
+    assert asha.get("/api/history").json()[0]["outcome"] == "Accepted"
+
+    assert ask(asha, "cancel")["reply"].startswith("Move cancelled")
+    assert asha.state()["rider"]["heading_to"] is None
+    ask(asha, "clear the busy place")
+    assert asha.state()["busy_place"] is None
+
+    ask(asha, "change my target to 2000")
+    assert asha.state()["metrics"]["target_earnings"] == 2000
+    assert asha.state()["metrics"]["available_hours"] == 5  # unchanged details are kept
+
+    main.WORLD.advance(60)
+    assert "of your Rs 2,000 goal" in ask(asha, "how much have I earned")["reply"]
+    assert ask(asha, "end my shift")["reply"].startswith("Shift ended.")
+    assert asha.state()["started"] is False
+
+
+def test_assistant_answers_questions(on_shift):
+    assert "Gachibowli" in ask(on_shift, "how is Gachibowli")["reply"]
+    assert ask(on_shift, "time left")["reply"] == "You have 4.5 hours left in this shift."
+    assert "last 7 days" in ask(on_shift, "what did I make this week")["reply"]
+    assert "Swiggy" in ask(on_shift, "which app pays me most")["reply"]
+    assert ask(on_shift, "what's my best hour")["reply"].startswith("Your best hour")
+    assert ask(on_shift, "top zones")["reply"].startswith("Best zones right now:")
+    assert "Gachibowli" in ask(on_shift, "where am I")["reply"]
+    assert ask(on_shift, "show me the map")["actions"] == [{"type": "scroll", "section": "map"}]
+    assert ask(on_shift, "log out")["actions"] == [{"type": "logout"}]
+
+
+def test_assistant_reports_problems_instead_of_failing(on_shift):
+    reply = ask(on_shift, "set my goal to 50000 in 30 hours")
+    assert reply["reply"].startswith("I could not set that goal. available hours:")
+    assert on_shift.state()["metrics"]["target_earnings"] == 1000  # nothing changed
+    assert "did not catch that" in ask(on_shift, "sing me a song")["reply"]
+    assert ask(on_shift, "something is busy")["reply"].startswith("Which place is busy?")
+    assert on_shift.post("/api/assistant", {"text": "x" * 301}).status_code == 422

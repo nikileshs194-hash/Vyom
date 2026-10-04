@@ -18,8 +18,9 @@ from typing import Literal, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
+import assistant
 import db
 import partners
 from agents import demand_level, master_agent
@@ -788,6 +789,247 @@ def simulate_reset(user=Depends(current_user)):
             rider["snoozed"] = {}
             rider["last_event"] = "All demo zone events cleared"
     return {"ok": True}
+
+
+# ---------------- assistant (text and voice commands) ----------------
+
+
+class AssistantIn(BaseModel):
+    text: str = Field(max_length=300)
+
+
+def money(amount):
+    return f"Rs {amount:,.0f}"
+
+
+def directions_url(user_id, lat, lon):
+    """Google Maps directions from the rider's real position to a point."""
+    rider = WORLD.riders.get(user_id)
+    mode = "driving" if rider and rider["vehicle"] == "car" else "two-wheeler"
+    url = f"https://www.google.com/maps/dir/?api=1&destination={lat},{lon}&travelmode={mode}"
+    pos = POSITIONS.get(user_id)
+    if pos and not pos["manual"]:
+        url += f"&origin={pos['lat']},{pos['lon']}"
+    return url
+
+
+def suggestion_text(rec):
+    return f"{rec['action']}. Expected {money(rec['net_rate_low'])} to {money(rec['net_rate_high'])} an hour."
+
+
+def run_intent(user, intent):
+    """Carry out one assistant intent. Returns (reply, actions for the page)."""
+    kind = intent["intent"]
+    uid = user["id"]
+    rider = WORLD.riders.get(uid)
+    refresh = [{"type": "refresh"}]
+    needs_shift = "Set a goal first - for example, say: set my goal to 1000 in 6 hours."
+
+    if kind == "help":
+        return assistant.HELP, []
+    if kind == "greeting":
+        return f"Hi {user['name']}. Tell me what to do, or say help to hear what I can do.", []
+    if kind == "unknown":
+        return "Sorry, I did not catch that. " + assistant.HELP, []
+    if kind == "logout":
+        return "Logging you out.", [{"type": "logout"}]
+    if kind == "show":
+        return f"Showing the {intent['section']} section.", [
+            {"type": "scroll", "section": intent["section"]}
+        ]
+
+    if kind == "set_goal":
+        if rider:
+            goal = {
+                "target_earnings": rider["target_earnings"],
+                "available_hours": rider["available_hours"],
+                "vehicle": rider["vehicle"],
+                "earned_so_far": round(max(rider["earned"], 0)),
+                "hours_elapsed": round(WORLD.hours_elapsed(rider), 2),
+            }
+        else:
+            goal = {"target_earnings": 1000, "available_hours": 6, "vehicle": "bike",
+                    "earned_so_far": 0, "hours_elapsed": 0}  # fmt: skip
+        goal.update({k: intent[k] for k in ("target_earnings", "available_hours", "vehicle")
+                     if k in intent})  # fmt: skip
+        try:
+            set_goal(GoalIn(**goal), user)
+        except ValidationError as exc:
+            error = exc.errors()[0]
+            field = str(error["loc"][-1]).replace("_", " ") + ": " if error["loc"] else ""
+            reason = error["msg"].replace("Value error, ", "")
+            return f"I could not set that goal. {field}{reason}.", []
+        rec = build_recommendation(WORLD.riders[uid])
+        return (
+            f"Goal set: {money(goal['target_earnings'])} in {goal['available_hours']:g} hours "
+            f"on a {goal['vehicle']}. My suggestion: {suggestion_text(rec)}",
+            refresh,
+        )
+
+    if kind == "set_busy_place":
+        place = intent.get("place")
+        if not place and intent.get("zone"):
+            in_zone = [p for p in PLACES if p["zone_id"] == intent["zone"]["id"]]
+            place = max(in_zone, key=lambda p: p["busy"]) if in_zone else None
+        if not place:
+            return "Which place is busy? Say, for example: Charminar is busy.", [
+                {"type": "scroll", "section": "busy"}
+            ]
+        set_busy_place(BusyPlaceIn(place_id=place["id"]), user)
+        reply = f"{place['name']} is now the busy place."
+        if WORLD.riders.get(uid):
+            reply += " " + suggestion_text(build_recommendation(WORLD.riders[uid]))
+        return reply, refresh
+    if kind == "clear_busy_place":
+        set_busy_place(BusyPlaceIn(place_id=None), user)
+        return "Busy place cleared.", refresh
+    if kind in ("traffic", "rain", "incentive"):
+        zone = intent["zone"]
+        body = ZoneEventIn(zone_id=zone["id"])
+        {"traffic": simulate_traffic, "rain": simulate_rain, "incentive": simulate_incentive}[
+            kind
+        ](body, user)
+        label = {"traffic": "Traffic spike", "rain": "Heavy rain", "incentive": "Incentive"}[kind]
+        return f"{label} started in {zone['name']} (demo event).", refresh
+    if kind == "reset_events":
+        simulate_reset(user)
+        return "All demo events cleared.", refresh
+
+    if kind == "set_location":
+        zone = intent["zone"]
+        set_location_zone(ZoneEventIn(zone_id=zone["id"]), user)
+        return f"Your location is set to {zone['name']} by hand.", refresh
+    if kind == "where_am_i":
+        pos = position_view(uid)
+        if not pos:
+            return "I do not have your location yet. Allow location in the browser.", []
+        if pos["manual"]:
+            return f"Your location is set by hand to {pos['zone_name']}.", []
+        return (
+            f"You are at {pos['place'] or 'an unnamed spot'}, {pos['distance_km']} km from the "
+            f"{pos['zone_name']} zone.",
+            [],
+        )
+
+    if kind == "navigate":
+        target = intent.get("place") or intent.get("zone")
+        if not target:
+            if not rider:
+                return "Tell me where to - for example: directions to Kompally.", []
+            target = build_recommendation(rider)["destination"]
+        url = directions_url(uid, target["lat"], target["lon"])
+        return f"Opening Google Maps directions to {target['name']}.", [
+            {"type": "open_url", "url": url, "label": f"Directions to {target['name']}"}
+        ]
+
+    if kind == "weather":
+        views = WORLD.zone_views(uid)
+        temp = round(sum(v["temp"] for v in views) / len(views), 1)
+        raining = [v["name"] for v in views if v["rain"] >= 0.5]
+        if raining:
+            return f"It is {temp} degrees, and raining in {len(raining)} zones including {raining[0]}.", []
+        return f"It is {temp} degrees and dry across the city.", []
+    if kind == "place_info":
+        place = intent["place"]
+        level = place_busy_now(place, WORLD.now)
+        return (
+            f"{place['name']} is in the {ZONE_BY_ID[place['zone_id']]['name']} zone. "
+            f"Busy level right now: {level} out of 5.",
+            [],
+        )
+    if kind in ("best_hour", "slowest_hour", "week", "apps"):
+        activity = get_activity(user)
+        if kind == "week":
+            return f"You earned {money(activity['week_total'])} in the last 7 days.", []
+        if kind == "apps":
+            if not activity["platforms"]:
+                return "No orders from the delivery apps in the last 7 days yet.", []
+            parts = [f"{p['name']} {money(p['amount'])}" for p in activity["platforms"]]
+            return "Last 7 days by app: " + ", ".join(parts) + ".", []
+        hour = activity[kind]
+        if not hour:
+            return "There is not enough earnings history to tell yet.", []
+        word = "best" if kind == "best_hour" else "slowest"
+        return f"Your {word} hour over the last 7 days is {hour['label']}, with {money(hour['amount'])}.", []
+
+    if kind == "zone_info" and not rider:
+        zone = intent["zone"]
+        view = next(v for v in WORLD.zone_views(uid) if v["id"] == zone["id"])
+        return (
+            f"{zone['name']}: {demand_level(view['demand'])} demand, "
+            f"{len(view['open_orders'])} open orders.",
+            [],
+        )
+    if kind == "earnings" and not rider:
+        return f"You have earned {money(get_activity(user)['today_total'])} today. No shift is running.", []
+    if not rider:
+        return needs_shift, [{"type": "scroll", "section": "goal"}]
+
+    # ---- everything below needs a running shift
+    rec = build_recommendation(rider)
+    metrics = metrics_view(rider, rec)
+    if kind == "recommendation":
+        return f"{suggestion_text(rec)} {rec['reason']}", [
+            {"type": "scroll", "section": "recommendation"}
+        ]
+    if kind == "accept":
+        accept_recommendation(user)
+        actions = list(refresh)
+        if rec["target_zone_id"] != rider["zone_id"]:
+            dest = rec["destination"]
+            actions.append({"type": "open_url", "url": directions_url(uid, dest["lat"], dest["lon"]),
+                            "label": f"Directions to {dest['name']}"})  # fmt: skip
+        return f"Accepted: {rec['action']}.", actions
+    if kind == "ignore":
+        ignore_recommendation(user)
+        after = build_recommendation(rider)
+        return f"Ignored. My suggestion is now: {suggestion_text(after)}", refresh
+    if kind == "cancel_move":
+        if not rider["heading_to"]:
+            return "There is no move to cancel.", []
+        cancel_move(user)
+        return "Move cancelled. You are taking orders here again.", refresh
+    if kind == "end_shift":
+        end_shift(user)
+        return f"Shift ended. You earned {money(metrics['earned_so_far'])}.", refresh
+    if kind == "earnings":
+        reply = (
+            f"You have earned {money(metrics['earned_so_far'])} of your "
+            f"{money(metrics['target_earnings'])} goal, {metrics['progress_pct']} percent."
+        )
+        if metrics["current_pace"] is not None:
+            reply += f" Your pace is {money(metrics['current_pace'])} an hour."
+        return reply + f" Projected by shift end: {money(metrics['projected_earnings'])}.", []
+    if kind == "time_left":
+        return f"You have {metrics['remaining_hours']} hours left in this shift.", []
+    if kind == "status":
+        return f"{rider_view(rider)['status_text']}. {suggestion_text(rec)}", []
+    if kind == "top_zones":
+        top = sorted(rec["ranked_candidates"], key=lambda c: -c["expected_rate"])[:3]
+        parts = [f"{c['zone_name']} at {money(c['expected_rate'])} an hour" for c in top]
+        return "Best zones right now: " + ", ".join(parts) + ".", [
+            {"type": "scroll", "section": "zones"}
+        ]
+    if kind == "zone_info":
+        c = next(c for c in rec["ranked_candidates"] if c["zone_id"] == intent["zone"]["id"])
+        return (
+            f"{c['zone_name']}: {c['demand_level']} demand, about {money(c['expected_rate'])} an "
+            f"hour, {c['travel_penalty_min']} minutes from you, {c['open_orders']} open orders.",
+            [],
+        )
+    return "Sorry, I did not catch that. " + assistant.HELP, []
+
+
+@app.post("/api/assistant")
+def assistant_command(body: AssistantIn, user=Depends(current_user)):
+    """One typed or spoken instruction: understand it, do it, say what happened."""
+    intent = assistant.parse(body.text)
+    with LOCK:
+        try:
+            reply, actions = run_intent(user, intent)
+        except HTTPException as exc:
+            reply, actions = str(exc.detail), []
+    return {"heard": body.text, "intent": intent["intent"], "reply": reply, "actions": actions}
 
 
 # Serve the website itself too, so one server on port 8000 is enough.

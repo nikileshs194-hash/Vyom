@@ -216,6 +216,9 @@ function signOut(message) {
   timers = [];
   if (watchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(watchId);
   watchId = null;
+  closeAssistant();
+  $("asstLog").innerHTML = "";
+  $("asstChips").innerHTML = "";
   $("appView").classList.add("hidden");
   $("navUser").classList.add("hidden");
   $("authView").classList.remove("hidden");
@@ -832,6 +835,153 @@ async function refreshHistory() {
     body.appendChild(tr);
   });
 }
+
+// -------------------------------------------------------------- assistant
+// Type or speak an instruction; the backend works out what was meant, does
+// it, and replies. Voice uses the browser's own speech recognition.
+
+const ASSISTANT_SECTIONS = {
+  map: "map", activity: "dayGrid", busy: "busyForm", history: "historyBody", feed: "feed",
+  zones: "zoneCompareBody", goal: "targetEarnings", recommendation: "recAction",
+};
+const ASSISTANT_CHIPS = [
+  "Where should I go?", "Accept", "How much have I earned?", "Charminar is busy", "Help",
+];
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+let listening = false;
+
+function assistantSay(text, who, link) {
+  const msg = el("div", text, "asst-msg " + who);
+  if (link) {
+    msg.appendChild(el("br"));
+    const a = el("a", link.label);
+    a.href = link.url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    msg.appendChild(a);
+  }
+  $("asstLog").appendChild(msg);
+  $("asstLog").scrollTop = $("asstLog").scrollHeight;
+}
+
+function speak(text) {
+  if (!$("asstSpeak").checked || !window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text.replace(/\bRs\b/g, "rupees"));
+  utterance.lang = "en-IN";
+  window.speechSynthesis.speak(utterance);
+}
+
+async function assistantSend(text, spoken) {
+  text = text.trim();
+  if (!text) return;
+  assistantSay(text, "you");
+  let result;
+  try {
+    result = await apiPost("/api/assistant", { text }, true);
+  } catch (err) {
+    assistantSay("I could not reach GigPilot. Is the server running?", "bot");
+    return;
+  }
+  let link = null;
+  for (const action of result.actions) {
+    if (action.type === "refresh") {
+      await poll();
+      refreshPlaces();
+      refreshActivity();
+      refreshHistory();
+    } else if (action.type === "scroll") {
+      const target = $(ASSISTANT_SECTIONS[action.section]);
+      if (target) (target.closest(".card") || target).scrollIntoView({ behavior: "smooth", block: "center" });
+    } else if (action.type === "open_url") {
+      link = action;
+      window.open(action.url, "_blank", "noopener"); // may be blocked; the link below always works
+    } else if (action.type === "logout") {
+      setTimeout(() => $("logoutBtn").click(), 1200);
+    }
+  }
+  assistantSay(result.reply, "bot", link);
+  if (spoken || $("asstSpeak").checked) speak(result.reply);
+}
+
+function openAssistant() {
+  $("asstPanel").classList.remove("hidden");
+  $("asstOpen").classList.add("hidden");
+  if (!$("asstLog").children.length) {
+    assistantSay(
+      "Hi! Tell me what to do - type it, or press the microphone and say it. " +
+        "Try: set my goal to 1500 in 6 hours.",
+      "bot"
+    );
+    ASSISTANT_CHIPS.forEach((text) => {
+      const chip = el("button", text, "asst-chip");
+      chip.type = "button";
+      chip.addEventListener("click", () => assistantSend(text, false));
+      $("asstChips").appendChild(chip);
+    });
+    if (!Recognition) {
+      $("asstMic").disabled = true;
+      $("asstMic").title = "Voice needs Chrome or Edge";
+    }
+  }
+  $("asstInput").focus();
+}
+function closeAssistant() {
+  if (recognition && listening) recognition.stop();
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  $("asstPanel").classList.add("hidden");
+  $("asstOpen").classList.remove("hidden");
+}
+$("asstOpen").addEventListener("click", openAssistant);
+$("asstClose").addEventListener("click", closeAssistant);
+$("asstForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = $("asstInput").value;
+  $("asstInput").value = "";
+  assistantSend(text, false);
+});
+
+$("asstMic").addEventListener("click", () => {
+  if (!Recognition) return;
+  if (listening) {
+    recognition.stop();
+    return;
+  }
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  recognition = new Recognition();
+  recognition.lang = "en-IN";
+  recognition.interimResults = true;
+  let heard = "";
+  recognition.onstart = () => {
+    listening = true;
+    $("asstMic").classList.add("listening");
+    $("asstInput").placeholder = "Listening...";
+  };
+  recognition.onresult = (event) => {
+    heard = Array.from(event.results).map((r) => r[0].transcript).join(" ");
+    $("asstInput").value = heard;
+  };
+  recognition.onerror = (event) => {
+    const denied = event.error === "not-allowed" || event.error === "service-not-allowed";
+    assistantSay(
+      denied
+        ? "I need microphone permission to hear you. Allow it in the browser, or type instead."
+        : "I could not hear that. Try again, or type it.",
+      "bot"
+    );
+  };
+  recognition.onend = () => {
+    listening = false;
+    $("asstMic").classList.remove("listening");
+    $("asstInput").placeholder = "Type or speak an instruction";
+    if (heard.trim()) {
+      $("asstInput").value = "";
+      assistantSend(heard, true);
+    }
+  };
+  recognition.start();
+});
 
 // ---------------------------------------------------------------- actions
 
