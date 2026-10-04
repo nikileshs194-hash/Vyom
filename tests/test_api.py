@@ -263,7 +263,6 @@ def test_goal_then_recommendation(on_shift):
     assert 55 <= rec["confidence"] <= 95
     assert len(rec["ranked_candidates"]) == 32
     assert "Required pace to hit goal: ~Rs 167/hour" in rec["decision_trace"]
-    assert [len(row["points"]) for row in data["outlook"]] == [12, 12]
 
 
 def test_earnings_accrue_and_are_stored(on_shift):
@@ -973,7 +972,7 @@ def test_falls_back_to_rules_when_gemini_fails(on_shift, scripted):
 
 def test_agent_tool_definitions_are_well_formed(asha):
     names = [tool["name"] for tool in agent.TOOLS]
-    assert len(names) == len(set(names)) == 17
+    assert len(names) == len(set(names)) == 18
     for tool in agent.TOOLS:
         assert tool["type"] == "function" and tool["description"]
         assert set(tool["parameters"]["required"]) <= set(tool["parameters"]["properties"])
@@ -1139,3 +1138,85 @@ def test_agent_is_told_which_language_to_reply_in(on_shift, scripted):
     # the note is for one turn only: earlier turns are kept as the rider's own words
     assert seen[2][0]["content"] == "నా లక్ష్యం ఎంత?"
     assert "Telugu" in agent.SYSTEM and "Kannada" in agent.SYSTEM
+
+
+# ------------------------------------------------- plan for the rest of the shift
+
+
+def plan_for(session):
+    """The plan the agent would work out for this rider (user 1) right now."""
+    rider = main.WORLD.riders[1]
+    return main.shift_plan(rider, main.build_recommendation(rider))
+
+
+def test_the_page_does_not_carry_the_plan(on_shift):
+    assert "plan" not in on_shift.state() and "outlook" not in on_shift.state()
+
+
+def test_plan_covers_the_rest_of_the_shift_hour_by_hour(on_shift):
+    plan, rec = plan_for(on_shift), on_shift.state()["recommendation"]
+    rows = plan["rows"]
+    assert [r["time"] for r in rows] == ["19:00", "20:00", "21:00", "22:00", "23:00"]
+    # the first hour is the live recommendation; the plan never contradicts it
+    assert (rows[0]["zone_id"], rows[0]["rate"]) == (rec["target_zone_id"], rec["expected_rate"])
+    totals = [r["total"] for r in rows]
+    assert totals == sorted(totals) and totals[0] > 250  # earnings only build up
+    assert plan["projected"] == totals[-1]
+    assert rows[-1]["earn"] < rows[1]["earn"]  # the last slot is only half an hour
+    assert plan["best_hour"]["rate"] == max(r["rate"] for r in rows)
+    assert plan["moves"] == sum(1 for r in rows if r["move_min"])
+    for row in rows:
+        assert row["rate"] > 0 and row["temp"] > 0 and row["demand_level"]
+
+
+def test_plan_says_whether_and_when_the_goal_is_reached(asha):
+    asha.post("/api/location", GACHIBOWLI)
+    asha.post("/api/goal", {**GOAL, "target_earnings": 600})  # easy: 350 to go in 4.5 hours
+    plan = plan_for(asha)
+    assert plan["shortfall"] == 0 and plan["already_reached"] is False
+    assert "19:00" < plan["goal_time"] < "23:30"
+    reached = [r["goal_reached"] for r in plan["rows"]]
+    assert reached == sorted(reached) and reached[-1] is True  # once reached, it stays reached
+
+    asha.post("/api/goal", {**GOAL, "target_earnings": 2500})  # out of reach in the time left
+    plan = plan_for(asha)
+    assert plan["goal_time"] is None
+    assert plan["shortfall"] == 2500 - plan["projected"] > 0
+    assert not any(r["goal_reached"] for r in plan["rows"])
+
+    asha.post("/api/goal", {**GOAL, "target_earnings": 200})  # already past it
+    plan = plan_for(asha)
+    assert plan["already_reached"] is True and plan["goal_time"] is None
+
+
+def test_plan_follows_a_busy_place_and_forecast_rain(on_shift):
+    before = plan_for(on_shift)
+    on_shift.post("/api/busy-place", {"place_id": "charminar"})
+    plan = plan_for(on_shift)
+    assert plan["rows"][0]["zone_name"] == "Charminar" and plan["rows"][0]["move_min"] > 0
+    assert plan["rows"][0]["busy_place"] == "Charminar"
+    assert plan["projected"] > before["projected"]
+
+    on_shift.post("/api/busy-place", {"place_id": None})
+    on_shift.post("/api/simulate/rain", {"zone_id": "GCB"})  # an hour of heavy rain
+    plan = plan_for(on_shift)
+    wet = [r for r in plan["rows"] if r["zone_id"] == "GCB" and r["rain_mm"] >= 0.5]
+    assert wet and plan["rain_hours"][0] == wet[0]["time"]
+
+
+def test_plan_shrinks_as_the_shift_goes_on_and_ends_with_it(on_shift):
+    main.WORLD.advance(150)  # 21:30, two hours left
+    assert [r["time"] for r in plan_for(on_shift)["rows"]] == ["21:30", "22:00", "23:00"]
+    main.WORLD.advance(150)
+    data = on_shift.state()
+    assert data["rider"]["status"] == "shift_over" or data["metrics"]["remaining_hours"] == 0
+    assert plan_for(on_shift)["rows"] == []
+
+
+def test_assistant_explains_the_plan(on_shift):
+    reply = ask(on_shift, "will I reach my goal today?")
+    assert reply["intent"] == "plan"
+    assert "Plan:" in reply["reply"] and "from 19:00" in reply["reply"]
+    assert reply["trace"] == [{"tool": "shift_plan", "args": {}, "ok": True}]
+    tool, _ = main.execute_tool({"id": 1, "name": "Asha"}, "shift_plan", {})
+    assert len(tool["hours"]) == 5 and tool["projected"] == plan_for(on_shift)["projected"]

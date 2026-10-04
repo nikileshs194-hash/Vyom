@@ -390,11 +390,27 @@ class World:
             )
         return views
 
-    def demand_forecast(self, zone_id, hours=12):
-        """Demand index for the next `hours`, using the weather forecast."""
-        start = self.now.replace(minute=0, second=0, microsecond=0)
-        points = []
-        for i in range(hours):
-            when = start + timedelta(hours=i)
-            points.append({"label": when.strftime("%H:00"), "value": self.demand(zone_id, when)})
-        return points
+    def zone_outlook(self, when):
+        """Each zone as it is expected to be at a future time: demand from order history
+        and the weather forecast, traffic from the rush-hour pattern and forecast rain."""
+        views = []
+        surge = self.busy_place
+        for zone in ZONES:
+            zid = zone["id"]
+            rain = self.rain(zid, when)
+            views.append(
+                {
+                    **zone,
+                    "demand": self.demand(zid, when),
+                    "traffic": round(typical_traffic(zone, when) * (1 + min(0.5, 0.12 * rain)), 2),
+                    "rain": rain,
+                    "temp": self.weather.at(zid, when)["temp"],
+                    "history": HISTORY["zone_avg"][zid],
+                    "busy_place": (
+                        surge["place"]["name"]
+                        if surge and surge["place"]["zone_id"] == zid and when < surge["until"]
+                        else None
+                    ),
+                }
+            )
+        return views

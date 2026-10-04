@@ -595,20 +595,6 @@ function renderShift(data) {
     zoneBody.appendChild(tr);
   });
 
-  // demand outlook: one row of boxes per zone, one box per hour
-  const outlook = $("outlook");
-  outlook.innerHTML = "";
-  outlook.appendChild(el("span", ""));
-  data.outlook[0].points.forEach((p) => outlook.appendChild(el("span", p.label.slice(0, 2))));
-  const peak = Math.max(...data.outlook.flatMap((row) => row.points.map((p) => p.value)));
-  data.outlook.forEach((row, i) => {
-    outlook.appendChild(el("span", row.zone_name + (i === 0 ? " (you)" : ""), "row-label"));
-    row.points.forEach((p) => {
-      const box = el("i", "", "box lv" + level(p.value, peak));
-      setTip(box, "Demand " + p.value.toFixed(2), row.zone_name + " at " + p.label);
-      outlook.appendChild(box);
-    });
-  });
 }
 
 function renderFeed(data) {
@@ -940,6 +926,7 @@ const TRANSLATIONS = [
   [/^Finding (.*) on the map$/, "మ్యాప్‌లో $1 వెతుకుతున్నాను", "ನಕ್ಷೆಯಲ್ಲಿ $1 ಹುಡುಕುತ್ತಿದ್ದೇನೆ"],
   [/^Comparing the zones$/, "జోన్లను పోల్చుతున్నాను", "ವಲಯಗಳನ್ನು ಹೋಲಿಸುತ್ತಿದ್ದೇನೆ"],
   [/^Reading your earnings activity$/, "మీ సంపాదన వివరాలు చూస్తున్నాను", "ನಿಮ್ಮ ಗಳಿಕೆಯ ವಿವರ ನೋಡುತ್ತಿದ್ದೇನೆ"],
+  [/^Working out your plan for the shift$/, "మీ షిఫ్ట్ ప్లాన్ తయారు చేస్తున్నాను", "ನಿಮ್ಮ ಶಿಫ್ಟ್ ಯೋಜನೆ ಸಿದ್ಧಪಡಿಸುತ್ತಿದ್ದೇನೆ"],
   [/^Reading your latest orders$/, "మీ తాజా ఆర్డర్లు చూస్తున్నాను", "ನಿಮ್ಮ ಇತ್ತೀಚಿನ ಆರ್ಡರ್‌ಗಳನ್ನು ನೋಡುತ್ತಿದ್ದೇನೆ"],
   [/^Opening Google Maps directions$/, "Google Maps దారి తెరుస్తున్నాను", "Google Maps ದಾರಿ ತೆರೆಯುತ್ತಿದ್ದೇನೆ"],
   [/^Showing (.*)$/, "$1 చూపిస్తున్నాను", "$1 ತೋರಿಸುತ್ತಿದ್ದೇನೆ"],
@@ -1151,6 +1138,9 @@ async function actOut(step) {
       break;
     case "earnings_summary":
       await lookAt($("hourGrid"), "Reading your earnings activity");
+      break;
+    case "shift_plan":
+      await lookAt($("recAction").closest(".card"), "Working out your plan for the shift");
       break;
     case "recent_orders":
       await lookAt($("recentList"), "Reading your latest orders");

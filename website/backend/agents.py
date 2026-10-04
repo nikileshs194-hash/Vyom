@@ -9,6 +9,8 @@ The agents are pure functions over a snapshot of the city (see
 World.zone_views), so the same logic runs on simulated or real feeds.
 """
 
+from datetime import timedelta
+
 from data import VEHICLE_COST_PER_KM
 
 MOVE_THRESHOLD = 1.08  # a move must beat staying put by 8% to be worth recommending
@@ -284,6 +286,88 @@ def planning_agent(opt_result, current_zone_id):
         "target_zone_id": best["zone_id"],
         "target_zone_name": best["zone_name"],
         "busy_place": best["busy_place"],
+    }
+
+
+def hourly_rate(zone, vehicle):
+    """Expected net Rs/hour in a zone from its demand, traffic and order history alone -
+    usable for a future hour, when there are no live orders to look at yet."""
+    hist = zone["history"]
+    surge = 1 + max(0.0, zone["demand"] - 1.0) * 0.35  # same surge rule the orders follow
+    net, _, _ = calculate_net_earning(hist["payout"] * surge, hist["km"], vehicle)
+    eta = 7 + hist["km"] * 2.7 * zone["traffic"]
+    wait = min(max(9 / max(zone["demand"], 0.05), 2.5), 40)
+    if zone.get("busy_place"):
+        net, wait = net * SURGE_PAY, SURGE_WAIT_MIN
+    return net * 60 / (wait + eta)
+
+
+def plan_shift(state, slots, start_zone_id, vehicle, travel, first=None):
+    """The rest of the shift, hour by hour: where to be, what it should pay, and the
+    running total against the goal. Part of the planning agent's job.
+
+    `slots` are the remaining stretches of the shift in order, each
+    {"start": datetime, "hours": length, "zones": zone views for that time}. A move is
+    planned only if it beats staying by MOVE_THRESHOLD after the ride there.
+    `first` = (zone_id, rate) pins the first slot to the live recommendation."""
+    earned = max(state["earned_so_far"], 0)
+    target = state["target_earnings"]
+    here = start_zone_id
+    rows, goal_time = [], None
+
+    for i, slot in enumerate(slots):
+        options = {}
+        for zone in slot["zones"]:
+            rate = hourly_rate(zone, vehicle)
+            if i == 0 and first and zone["id"] == first[0]:
+                rate = first[1]
+            ride_min, ride_km = travel(here, zone["id"])
+            usable = max(slot["hours"] - ride_min / 60, 0)
+            gain = rate * usable - calculate_fuel_cost(ride_km, vehicle)
+            options[zone["id"]] = (gain, rate, ride_min, zone)
+        stay = options[here]
+        pick = max(options.values(), key=lambda o: o[0])
+        if i == 0 and first:
+            pick = options[first[0]]
+        elif pick[3]["id"] != here and pick[0] < stay[0] * MOVE_THRESHOLD + 5:
+            pick = stay
+        gain, rate, ride_min, zone = pick
+        gain = max(gain, 0)
+
+        if goal_time is None and gain > 0 and earned < target <= earned + gain:
+            into = (target - earned) / gain * slot["hours"] * 60
+            goal_time = slot["start"] + timedelta(minutes=round(into))
+        earned += gain
+        rows.append(
+            {
+                "time": slot["start"].strftime("%H:%M"),
+                "zone_id": zone["id"],
+                "zone_name": zone["name"],
+                "move_min": round(ride_min) if zone["id"] != here else 0,
+                "rate": round(rate),
+                "earn": round(gain),
+                "total": round(earned),
+                "demand_level": demand_level(zone["demand"]),
+                "rain_mm": zone["rain"],
+                "temp": zone["temp"],
+                "busy_place": zone.get("busy_place"),
+                "goal_reached": earned >= target,
+            }
+        )
+        here = zone["id"]
+
+    best = max(rows, key=lambda r: r["rate"], default=None)
+    return {
+        "rows": rows,
+        "projected": round(earned),
+        "goal": round(target),
+        "goal_time": goal_time.strftime("%H:%M") if goal_time else None,
+        "already_reached": state["earned_so_far"] >= target,
+        "shortfall": max(round(target - earned), 0),
+        "best_hour": best and {"time": best["time"], "zone_name": best["zone_name"],
+                               "rate": best["rate"]},  # fmt: skip
+        "rain_hours": [r["time"] for r in rows if r["rain_mm"] >= 0.5],
+        "moves": sum(1 for r in rows if r["move_min"]),
     }
 
 

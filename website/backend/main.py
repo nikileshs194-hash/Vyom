@@ -25,7 +25,7 @@ import agent
 import assistant
 import db
 import partners
-from agents import demand_level, master_agent
+from agents import demand_level, master_agent, plan_shift
 from data import (
     CITY,
     HISTORY,
@@ -325,6 +325,23 @@ def decide(user, rider, rec, outcome):
         "time": WORLD.now.strftime("%H:%M"),
         "target_zone_id": after["target_zone_id"],
     }
+
+
+def shift_plan(rider, rec):
+    """Hour-by-hour plan for what is left of the shift (see agents.plan_shift)."""
+    now = WORLD.now
+    left = rider["available_hours"] - WORLD.hours_elapsed(rider)
+    slots, start = [], now
+    while left > 0.05 and len(slots) < 12:
+        to_next_hour = 1 - (start.minute * 60 + start.second) / 3600
+        hours = min(left, to_next_hour if to_next_hour > 0.05 else 1.0)
+        middle = start + timedelta(hours=hours / 2)
+        slots.append({"start": start, "hours": hours, "zones": WORLD.zone_outlook(middle)})
+        start += timedelta(hours=hours)
+        left -= hours
+    state = {"earned_so_far": rider["earned"], "target_earnings": rider["target_earnings"]}
+    return plan_shift(state, slots, rider_location(rider), rider["vehicle"], WORLD.travel,
+                      first=(rec["target_zone_id"], rec["expected_rate"]))  # fmt: skip
 
 
 def rider_view(rider):
@@ -658,13 +675,6 @@ def get_state(user=Depends(current_user)):
                 rider=rider_view(rider),
                 my_events=list(rider["events"]),
                 last_event=rider["last_event"],
-                outlook=[
-                    {
-                        "zone_name": ZONE_BY_ID[zid]["name"],
-                        "points": WORLD.demand_forecast(zid),
-                    }
-                    for zid in (location, compare)
-                ],
             )
         return data
 
@@ -1105,6 +1115,23 @@ def run_intent(user, intent, confirm_by_yes=True):
     # ---- everything below needs a running shift
     rec = build_recommendation(rider)
     metrics = metrics_view(rider, rec)
+    if kind == "plan":
+        plan = shift_plan(rider, rec)
+        if plan["already_reached"]:
+            outcome = "You have already reached your goal."
+        elif plan["goal_time"]:
+            outcome = f"On this plan you reach {money(plan['goal'])} at about {plan['goal_time']}."
+        else:
+            outcome = (
+                f"On this plan you finish at {money(plan['projected'])}, "
+                f"{money(plan['shortfall'])} short of your goal."
+            )
+        stops = []
+        for row in plan["rows"]:
+            if not stops or stops[-1][1] != row["zone_name"]:
+                stops.append((row["time"], row["zone_name"]))
+        route = ", then ".join(f"{name} from {time}" for time, name in stops[:4])
+        return f"{outcome} Plan: {route}.", []
     if kind == "recommendation":
         return f"{suggestion_text(rec)} {rec['reason']}", [
             {"type": "scroll", "section": "recommendation"}
@@ -1266,6 +1293,13 @@ def _execute_tool(user, name, args):
         keep = ("today_total", "week_total", "active_days", "best_hour", "slowest_hour",
                 "platforms", "zones", "total_orders")  # fmt: skip
         return {k: a[k] for k in keep}, []
+    if name == "shift_plan":
+        if not rider:
+            return {"error": "No shift is running, so there is nothing to plan yet."}, []
+        plan = shift_plan(rider, build_recommendation(rider))
+        keep = ("time", "zone_name", "move_min", "rate", "total", "rain_mm", "goal_reached")
+        return {**{k: v for k, v in plan.items() if k != "rows"},
+                "hours": [{k: r[k] for k in keep} for r in plan["rows"]]}, []  # fmt: skip
     if name == "recent_orders":
         limit = max(1, min(int(args.get("limit") or 5), 20))
         return {"orders": get_activity(user)["recent"][:limit]}, []
@@ -1331,6 +1365,7 @@ def intent_trace(intent):
         steps[question] = ("earnings_summary", {})
     for question in ("status", "time_left", "where_am_i", "weather"):
         steps[question] = ("get_status", {})
+    steps["plan"] = ("shift_plan", {})
     if kind not in steps:
         return []
     tool, args = steps[kind]

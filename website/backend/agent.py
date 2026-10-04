@@ -117,6 +117,12 @@ TOOLS = [
         "by delivery app and by zone.",
     ),
     _function(
+        "shift_plan",
+        "The hour-by-hour plan for the rest of the shift: which zone to be in each hour, the "
+        "expected rate, forecast rain, the running total, and whether and when the goal is "
+        "reached. Use it for questions like 'will I make my goal?' or 'what is my plan?'.",
+    ),
+    _function(
         "recent_orders",
         "The rider's latest orders with app, merchant, zone, time and amount.",
         {"limit": {"type": "integer", "description": "How many to return (default 5)"}},
@@ -204,6 +210,7 @@ Examples of turning an instruction into tool calls:
   suggestion from the tool result
 - "how am I doing?" -> answer from the status snapshot; no tool needed
 - "what's the best area right now?" -> top_zones()
+- "will I reach my goal today?" / "plan my evening" -> shift_plan()
 
 Zones: {", ".join(z["name"] for z in ZONES)}.
 Busy places: {", ".join(p["name"] for p in PLACES)}."""

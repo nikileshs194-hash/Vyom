@@ -275,6 +275,9 @@ def parse(text):
     if _has(t, "where should", "recommend\\w*", "suggest\\w*", "what should i do", "best zone",
             "where to go", "what next", "advice"):  # fmt: skip
         return {"intent": "recommendation"}
+    if _has(t, "plan", "will i (reach|make|hit)", "can i (reach|make|hit)", "rest of (my|the) shift",
+            "schedule", "on track"):  # fmt: skip
+        return {"intent": "plan"}
     if _has(t, "best hour", "peak", "when do i earn", "best time"):
         return {"intent": "best_hour"}
     if _has(t, "slowest", "worst hour", "worst time"):

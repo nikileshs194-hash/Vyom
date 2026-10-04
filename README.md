@@ -80,6 +80,15 @@ their past shifts and orders (around 140 shifts and 2,000 orders) into their acc
 history are generated in `website/backend/partners.py`, standing in for the feed the
 delivery platforms would provide.
 
+## Plan for the rest of the shift
+
+Ask the agent "will I reach my goal today?" or "what's my plan?" and it works
+out the remaining hours of the shift: which zone to be in each hour, the
+expected rate, forecast rain, and whether and when the goal is reached. It
+uses the order history, the real hourly weather forecast and road travel
+times, plans a move only when it pays for the ride, and starts from the live
+recommendation.
+
 ## Busy places
 
 `website/backend/places.py` is a dataset of 95 well-known busy spots in

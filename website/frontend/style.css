@@ -275,14 +275,7 @@ input, select {
 }
 .heat-legend i { width: 13px; height: 13px; border-radius: 3px; display: inline-block; }
 
-.outlook {
-  display: grid; grid-template-columns: 110px repeat(12, 26px); gap: 4px;
-  font-size: 11px; color: var(--muted); align-items: center; width: max-content;
-  margin-top: 10px;
-}
-.outlook .box { height: 26px; border-radius: 5px; }
-.outlook .row-label { font-size: 13px; color: var(--text); white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; }
+.span-all { grid-column: 1 / -1; }
 
 .plain-list { list-style: none; margin: 0; padding: 0; font-size: 13px; }
 .plain-list li {
