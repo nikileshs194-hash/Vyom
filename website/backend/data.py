@@ -7,9 +7,11 @@ here, because no platform exposes it for free. It is generated from one
 consistent demand model, so history, live orders and forecasts agree.
 """
 
+import json
 import math
 import random
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from places import CATEGORY_PROFILE, PLACES
 
@@ -21,7 +23,7 @@ VEHICLE_COST_PER_KM = {
     "car": 3.5,
 }
 
-HISTORY_DAYS = 28
+HISTORY_DAYS = 60
 BASE_ORDERS_PER_HOUR = 12  # market-wide orders per zone-hour at demand index 1.0
 
 # (id, name, lat, lon, type)
@@ -97,7 +99,10 @@ PLACE_BY_ID = {p["id"]: p for p in PLACES}
 # a zone is as popular as the busy places inside it
 for _zone in ZONES:
     _busy = sum(p["busy"] for p in PLACES if p["zone_id"] == _zone["id"])
-    _zone["popularity"] = round(min(1.3, 0.9 + 0.04 * _busy), 2)
+    _zone["busy_total"] = _busy
+_busiest = max(z["busy_total"] for z in ZONES)
+for _zone in ZONES:  # 0.85 for a zone with nothing in it, up to 1.3 for the busiest
+    _zone["popularity"] = round(0.85 + 0.45 * _zone.pop("busy_total") / _busiest, 2)
 
 
 def _bump(hour, peak, width):
@@ -238,7 +243,30 @@ def generate_history(today=None, days=HISTORY_DAYS, seed=2026):
     }
 
 
-HISTORY = generate_history()
+def load_history():
+    """The market history takes several seconds to generate, so it is built once a day
+    and kept on disk; a change to the zones, places or settings rebuilds it."""
+    today = datetime.now(IST).date()
+    hash_of = sum(len(z["name"]) + int(z["popularity"] * 100) for z in ZONES)
+    name = f"history_{today}_{HISTORY_DAYS}d_{len(ZONES)}z_{len(PLACES)}p_{hash_of}.json"
+    folder = Path(__file__).parent / "cache"
+    path = folder / name
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        pass
+    history = generate_history(today)
+    try:
+        folder.mkdir(exist_ok=True)
+        for old in folder.glob("history_*.json"):
+            old.unlink()
+        path.write_text(json.dumps(history))
+    except OSError:
+        pass  # a read-only folder just means it is rebuilt next time
+    return history
+
+
+HISTORY = load_history()
 
 
 def forecast_demand(zone_id, when):

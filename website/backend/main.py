@@ -50,7 +50,8 @@ PENDING_GOALS = {}  # user_id -> a goal waiting for the rider to say "yes" (rule
 COARSE_FIX_METRES = 5000  # a fix this vague is a network guess, not GPS; it jumps around
 TRAIL_MIN_METRES = 30  # store a new location point only after moving this far...
 TRAIL_MAX_SECONDS = 120  # ...or after this long
-ACTIVITY_WEEKS = 18
+ACTIVITY_WEEKS = 26
+SYNC_VERSION = 2  # bumped when the synced history gains something older accounts lack
 DEFAULT_ZONE = "MDP"
 
 WEATHER, ROADS, TRAFFIC, GEOCODER = Weather(), Roads(), Traffic(), Places()
@@ -102,11 +103,25 @@ def activity_start(now):
 def sync_partner_history(user_id, zone_id):
     """First time we know where a rider works: pull in their order history
     from the partner apps (generated - see partners.py). Happens once."""
-    if db.is_synced(user_id):
+    version = db.sync_version(user_id)
+    if version >= SYNC_VERSION:
         return
     now = WORLD.now
-    orders = partners.past_orders(user_id, zone_id, activity_start(now).date(), now)
-    db.add_synced_orders(user_id, orders)
+    until = now.date()
+    if version == 1:
+        # Synced by an earlier version: its orders have no shifts, and it has fewer weeks.
+        # Give each of those days a shift, then add the older weeks in front of them.
+        days = db.unlinked_order_days(user_id)
+        for d in days:
+            start = datetime.fromisoformat(d["first"]) - timedelta(minutes=15)
+            end = datetime.fromisoformat(d["last"]) + timedelta(minutes=20)
+            hours = round((end - start).total_seconds() / 3600 * 2) / 2
+            db.link_day_to_shift(user_id, d["day"], start, end,
+                                 partners.goal_for_day(user_id, d["day"]), hours, "bike")  # fmt: skip
+        if days:
+            until = datetime.fromisoformat(days[0]["day"]).date()
+    shifts = partners.past_shifts(user_id, zone_id, activity_start(now).date(), until)
+    db.add_synced_shifts(user_id, shifts, SYNC_VERSION)
 
 
 def reset_world(now=None, seed=None, db_path=None):
@@ -889,6 +904,7 @@ def simulate_reset(user=Depends(current_user)):
 
 class AssistantIn(BaseModel):
     text: str = Field(max_length=300)
+    lang: Literal["en", "te", "kn"] = "en"  # the language the rider is using
 
 
 def money(amount):
@@ -1351,9 +1367,9 @@ def assistant_command(body: AssistantIn, user=Depends(current_user)):
         try:  # the model call is slow, so it runs outside the lock; each tool locks itself
             with LOCK:
                 status = tool_status(user)
-            reply, actions, trace = AGENT.run(user, body.text, execute_tool, status)
+            reply, actions, trace = AGENT.run(user, body.text, execute_tool, status, body.lang)
             db.add_agent_log(user["id"], real_now(), body.text, "gemini", json.dumps(trace), reply)
-            return {"heard": body.text, "engine": "gemini", "reply": reply,
+            return {"heard": body.text, "engine": "gemini", "reply": reply, "lang": body.lang,
                     "actions": unique(actions), "trace": trace, "problem": None}  # fmt: skip
         except agent.AgentError as exc:
             problem = AGENT.last_error = str(exc)
@@ -1367,8 +1383,9 @@ def assistant_command(body: AssistantIn, user=Depends(current_user)):
     done = bool(actions) or intent["intent"] not in CHANGING_INTENTS
     trace = intent_trace(intent) if done else []
     db.add_agent_log(user["id"], real_now(), body.text, "rules", json.dumps(trace), reply)
+    # the rule-based assistant understands a few Telugu and Kannada words but answers in English
     return {"heard": body.text, "engine": "rules", "intent": intent["intent"], "reply": reply,
-            "actions": actions, "trace": trace, "problem": problem}  # fmt: skip
+            "lang": "en", "actions": actions, "trace": trace, "problem": problem}  # fmt: skip
 
 
 # Serve the website itself too, so one server on port 8000 is enough.

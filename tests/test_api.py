@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "website" / "backen
 import agent  # noqa: E402
 import assistant  # noqa: E402
 import main  # noqa: E402
+import partners  # noqa: E402
 from data import HISTORY, IST, PLACES, ZONE_BY_ID, ZONES  # noqa: E402
 
 FRIDAY_7PM = datetime(2026, 10, 2, 19, 0, tzinfo=IST)
@@ -196,7 +197,7 @@ def test_order_under_way_is_shown_before_it_pays(on_shift):
     m = on_shift.state()["metrics"]
     assert m["earned_so_far"] == 250 and m["current_pace"] is None
     coming = m["order_under_way"]
-    assert coming and coming["net"] > 0 and coming["platform"] in {"Swiggy", "Zomato", "Zepto", "Blinkit"}
+    assert coming and coming["net"] > 0 and coming["platform"] in partners.PLATFORM_NAMES
     main.WORLD.advance(60)
     assert on_shift.state()["metrics"]["earned_so_far"] >= 250 + coming["net"]
 
@@ -281,6 +282,8 @@ def test_incentive_triggers_move_and_arrival_is_by_real_position(on_shift):
     data = on_shift.state()
     assert data["last_event"] == "Incentive activated in Kondapur (demo)"
     assert on_shift.candidate("KDP")["incentive_note"] == "Complete 3 orders for Rs 100 bonus"
+    on_shift.post("/api/busy-place", {"place_id": "sarath-city"})  # a rush in Kondapur too
+    data = on_shift.state()
     assert data["recommendation"]["action"] == "Move to Kondapur"
 
     assert on_shift.post("/api/accept").json()["target_zone_name"] == "Kondapur"
@@ -304,7 +307,7 @@ def test_incentive_triggers_move_and_arrival_is_by_real_position(on_shift):
 
 
 def test_cancel_move_resumes_orders(on_shift):
-    on_shift.post("/api/simulate/incentive", {"zone_id": "KDP"})
+    on_shift.post("/api/busy-place", {"place_id": "sarath-city"})
     on_shift.post("/api/accept")
     main.WORLD.advance(45)
     assert on_shift.state()["rider"]["status"] == "heading"
@@ -314,7 +317,7 @@ def test_cancel_move_resumes_orders(on_shift):
 
 
 def test_ignore_snoozes_the_suggested_zone(on_shift):
-    on_shift.post("/api/simulate/incentive", {"zone_id": "KDP"})
+    on_shift.post("/api/busy-place", {"place_id": "sarath-city"})
     assert on_shift.state()["recommendation"]["target_zone_id"] == "KDP"
     on_shift.post("/api/ignore")
     assert on_shift.state()["recommendation"]["target_zone_id"] != "KDP"
@@ -550,7 +553,7 @@ def test_busy_place_wears_off(on_shift):
 def test_activity_grids(on_shift):
     main.WORLD.advance(150)
     a = on_shift.get("/api/activity").json()
-    assert len(a["days"]) == 17 * 7 + 5  # 18 weeks of boxes, ending on Friday
+    assert len(a["days"]) == 25 * 7 + 5  # 26 weeks of boxes, ending on Friday
     assert a["days"][0]["label"].startswith("Mon")
     assert a["days"][-1]["date"] == "2026-10-02"
     assert a["days"][-1]["amount"] == a["today_total"] > 0
@@ -578,7 +581,8 @@ def test_order_history_is_synced_from_partner_apps(asha):
     assert a["total_orders"] > 1000
     assert a["active_days"] > 80
     assert a["today_total"] == 0  # history stops yesterday; today comes from the live feed
-    assert {p["name"] for p in a["platforms"]} == {"Swiggy", "Zomato", "Zepto", "Blinkit"}
+    assert {p["name"] for p in a["platforms"]} <= partners.PLATFORM_NAMES
+    assert len(a["platforms"]) >= 5  # food and quick-commerce apps
     assert sum(p["share_pct"] for p in a["platforms"]) == pytest.approx(100, abs=2)
     assert a["zones"][0]["zone_name"] == "Gachibowli"  # mostly the home zone
     newest = a["recent"][0]
@@ -616,9 +620,9 @@ def test_live_orders_come_from_a_partner_app(on_shift):
     main.WORLD.advance(120)
     a = on_shift.get("/api/activity").json()
     today = [e for e in a["recent"] if e["date"] == "2026-10-02"]
-    assert today and all(e["platform"] in {"Swiggy", "Zomato", "Zepto", "Blinkit"} for e in today)
+    assert today and all(e["platform"] in partners.PLATFORM_NAMES for e in today)
     events = [e["text"] for e in on_shift.state()["my_events"] if e["kind"] == "order"]
-    assert events and all(e.split()[0] in {"Swiggy", "Zomato", "Zepto", "Blinkit"} for e in events)
+    assert events and all(e.startswith(tuple(partners.PLATFORM_NAMES)) for e in events)
 
 
 def test_there_is_no_manual_entry(client, asha):
@@ -887,7 +891,9 @@ def test_agent_chains_several_tools_for_one_instruction(asha, scripted):
     words = "set goal 1500 for 6 hours, charminar is packed, take me there"
     assert second_turn[0]["type"] == "user_input"
     # the rider's words go out with a status snapshot, so the model need not ask for one
-    assert second_turn[0]["content"].startswith(words + "\n\n[GigPilot status right now: {")
+    assert second_turn[0]["content"].startswith(
+        words + "\n\n[Reply in English.]\n[GigPilot status right now: {"
+    )
     assert '"nearest_zone": "Gachibowli"' in second_turn[0]["content"]
     assert second_turn[1] == {"type": "thought", "signature": "abc"}  # model state passed back
     assert second_turn[-1]["type"] == "function_result"
@@ -902,7 +908,7 @@ def test_agent_remembers_the_conversation(on_shift, scripted):
     ask(on_shift, "charminar")
     contents = [i.get("content") for i in seen[1] if i["type"] == "user_input"]
     assert contents[0] == "somewhere is busy"  # earlier turns are kept without their snapshot
-    assert contents[1].startswith("charminar\n\n[GigPilot status right now:")
+    assert contents[1].startswith("charminar\n\n[Reply in English.]\n[GigPilot status right now:")
 
     on_shift.post("/api/assistant/reset")
     seen = scripted(model_says("Hello."))
@@ -1078,3 +1084,58 @@ def test_every_instruction_is_recorded(on_shift):
     assert [row["said"] for row in log] == ["sing me a song", "set my goal to 2600 in 7 hours"]
     assert log[1]["engine"] == "rules" and '"set_goal"' in log[1]["steps"]
     assert log[1]["reply"].startswith("Goal set: Rs 2,600")
+
+
+# ------------------------------------------------- English, Telugu, Kannada
+
+
+@pytest.mark.parametrize(
+    "said, intent",
+    [
+        ("అంగీకరించు", "accept"),
+        ("వద్దు", "ignore"),
+        ("ఎక్కడికి వెళ్ళాలి?", "recommendation"),
+        ("ఎంత సంపాదించాను", "earnings"),
+        ("షిఫ్ట్ ముగించు", "end_shift"),
+        ("నా లక్ష్యం 1500, 6 గంటల్లో", "set_goal"),
+        ("Charminar బిజీగా ఉంది", "set_busy_place"),
+        ("ಒಪ್ಪಿಕೊ", "accept"),
+        ("ಬೇಡ", "ignore"),
+        ("ಎಲ್ಲಿಗೆ ಹೋಗಬೇಕು?", "recommendation"),
+        ("ಎಷ್ಟು ಗಳಿಸಿದ್ದೇನೆ", "earnings"),
+        ("ಶಿಫ್ಟ್ ಮುಗಿಸು", "end_shift"),
+        ("ನನ್ನ ಗುರಿ 1500, 6 ಗಂಟೆಗಳಲ್ಲಿ", "set_goal"),
+        ("Charminar ಬ್ಯುಸಿ ಇದೆ", "set_busy_place"),
+    ],
+)
+def test_basic_telugu_and_kannada_instructions(said, intent):
+    assert assistant.parse(said)["intent"] == intent
+
+
+def test_goal_in_telugu_and_kannada_is_read_exactly():
+    for said in ("నా లక్ష్యం 1500, 6 గంటల్లో", "ನನ್ನ ಗುರಿ 1500, 6 ಗಂಟೆಗಳಲ್ಲಿ"):
+        goal = assistant.parse(said)
+        assert (goal["target_earnings"], goal["available_hours"]) == (1500, 6)
+
+
+def test_basic_mode_acts_on_telugu_but_answers_in_english(asha):
+    asha.post("/api/location", GACHIBOWLI)
+    reply = asha.post("/api/assistant", {"text": "నా లక్ష్యం 1500, 6 గంటల్లో", "lang": "te"}).json()
+    assert (reply["engine"], reply["lang"]) == ("rules", "en")
+    assert reply["reply"].startswith("Goal set: Rs 1,500 in 6 hours")
+    assert asha.state()["metrics"]["target_earnings"] == 1500
+    assert asha.post("/api/assistant", {"text": "hi", "lang": "hi"}).status_code == 422
+
+
+def test_agent_is_told_which_language_to_reply_in(on_shift, scripted):
+    seen = scripted(model_says("మీ లక్ష్యం Rs 1,000."), model_says("ನಿಮ್ಮ ಗುರಿ Rs 1,000."),
+                    model_says("Your goal is Rs 1,000."))  # fmt: skip
+    for lang, name in (("te", "Telugu"), ("kn", "Kannada"), ("en", "English")):
+        reply = on_shift.post("/api/assistant", {"text": "నా లక్ష్యం ఎంత?", "lang": lang}).json()
+        assert (reply["engine"], reply["lang"]) == ("gemini", lang)
+    asked = [turn[-1]["content"] for turn in seen]
+    assert "[Reply in Telugu.]" in asked[0] and asked[0].startswith("నా లక్ష్యం ఎంత?")
+    assert "[Reply in Kannada.]" in asked[1] and "[Reply in English.]" in asked[2]
+    # the note is for one turn only: earlier turns are kept as the rider's own words
+    assert seen[2][0]["content"] == "నా లక్ష్యం ఎంత?"
+    assert "Telugu" in agent.SYSTEM and "Kannada" in agent.SYSTEM

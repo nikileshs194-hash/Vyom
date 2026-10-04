@@ -8,3 +8,4 @@ gigpilot.db
 *.db-journal
 gigpilot-before-sync.db
 .env
+website/backend/cache/history_*.json

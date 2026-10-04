@@ -511,6 +511,10 @@ input:focus, select:focus { outline: none; border-color: var(--blue); box-shadow
 }
 .asst-engine.ai { background: var(--lv1); color: var(--blue-dark); }
 .asst-engine:empty { display: none; }
+.asst-lang {
+  flex: none; border: 1px solid var(--border); border-radius: 12px; padding: 8px 8px;
+  font-size: 13px; font-weight: 600; background: white; cursor: pointer; max-width: 104px;
+}
 .asst-mic {
   flex: none; width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--border);
   background: white; color: var(--navy); cursor: pointer;

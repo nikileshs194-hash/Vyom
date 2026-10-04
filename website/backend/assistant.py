@@ -83,10 +83,56 @@ def _join_split(match):
     return match.group(0)
 
 
+# Everyday Telugu and Kannada words for the commonest instructions, mapped to the English
+# the rules below understand. This keeps the basics working without the AI agent; anything
+# beyond these (and all free-form speech) needs the Gemini agent, which knows both languages.
+# Longer phrases are listed first so they are matched before the words inside them.
+OTHER_LANGUAGES = [
+    # ---- Telugu
+    ("ఎక్కడికి వెళ్ళాలి", "where should i go"), ("ఎక్కడికి వెళ్లాలి", "where should i go"),
+    ("ఎక్కడ పని చేయాలి", "where should i go"), ("ఎంత సంపాదించాను", "how much have i earned"),
+    ("ఎంత సమయం మిగిలింది", "time left"), ("నన్ను అక్కడికి తీసుకెళ్ళు", "take me there"),
+    ("షిఫ్ట్ ముగించు", "end shift"), ("షిఫ్ట్ ఆపు", "end shift"),
+    ("షిఫ్ట్ ప్రారంభించు", "start shift"), ("మొదలుపెట్టు", "start shift"),
+    ("రద్దీగా ఉంది", "is busy"), ("బిజీగా ఉంది", "is busy"), ("రద్దీ", "busy"), ("బిజీ", "busy"),
+    ("మ్యాప్ చూపించు", "show map"), ("దారి చూపించు", "directions"),
+    ("అంగీకరించు", "accept"), ("ఒప్పుకో", "accept"), ("అవును", "yes"), ("సరే", "ok"),
+    ("విస్మరించు", "ignore"), ("వద్దు", "ignore"), ("కాదు", "no"),
+    ("రద్దు చేయి", "cancel"), ("రద్దు", "cancel"), ("లక్ష్యం", "goal"), ("టార్గెట్", "goal"),
+    ("గంటల్లో", "hours"), ("గంటలలో", "hours"), ("గంటలు", "hours"), ("గంట", "hours"),
+    ("రూపాయలు", ""), ("రూపాయిలు", ""), ("సంపాదన", "earnings"), ("వాతావరణం", "weather"),
+    ("స్థితి", "status"), ("సహాయం", "help"), ("మ్యాప్", "map"), ("దారి", "directions"),
+    ("స్కూటర్", "scooter"), ("బైక్", "bike"), ("కారు", "car"),
+    # ---- Kannada
+    ("ಎಲ್ಲಿಗೆ ಹೋಗಬೇಕು", "where should i go"), ("ಎಲ್ಲಿ ಕೆಲಸ ಮಾಡಬೇಕು", "where should i go"),
+    ("ಎಷ್ಟು ಗಳಿಸಿದ್ದೇನೆ", "how much have i earned"), ("ಎಷ್ಟು ಸಮಯ ಉಳಿದಿದೆ", "time left"),
+    ("ನನ್ನನ್ನು ಅಲ್ಲಿಗೆ ಕರೆದುಕೊಂಡು ಹೋಗು", "take me there"),
+    ("ಶಿಫ್ಟ್ ಮುಗಿಸು", "end shift"), ("ಶಿಫ್ಟ್ ನಿಲ್ಲಿಸು", "end shift"),
+    ("ಶಿಫ್ಟ್ ಪ್ರಾರಂಭಿಸು", "start shift"), ("ಶುರುಮಾಡು", "start shift"),
+    ("ಬ್ಯುಸಿ ಇದೆ", "is busy"), ("ಜನಸಂದಣಿ", "busy"), ("ಬ್ಯುಸಿ", "busy"),
+    ("ನಕ್ಷೆ ತೋರಿಸು", "show map"), ("ದಾರಿ ತೋರಿಸು", "directions"),
+    ("ಒಪ್ಪಿಕೊಳ್ಳಿ", "accept"), ("ಒಪ್ಪಿಕೊ", "accept"), ("ಹೌದು", "yes"), ("ಸರಿ", "ok"),
+    ("ನಿರ್ಲಕ್ಷಿಸು", "ignore"), ("ಬೇಡ", "ignore"), ("ಇಲ್ಲ", "no"),
+    ("ರದ್ದುಮಾಡು", "cancel"), ("ರದ್ದು", "cancel"), ("ಗುರಿ", "goal"), ("ಟಾರ್ಗೆಟ್", "goal"),
+    ("ಗಂಟೆಗಳಲ್ಲಿ", "hours"), ("ಗಂಟೆಗಳು", "hours"), ("ಗಂಟೆ", "hours"),
+    ("ರೂಪಾಯಿಗಳು", ""), ("ರೂಪಾಯಿ", ""), ("ಗಳಿಕೆ", "earnings"), ("ಹವಾಮಾನ", "weather"),
+    ("ಸ್ಥಿತಿ", "status"), ("ಸಹಾಯ", "help"), ("ನಕ್ಷೆ", "map"), ("ದಾರಿ", "directions"),
+    ("ಸ್ಕೂಟರ್", "scooter"), ("ಬೈಕ್", "bike"), ("ಕಾರು", "car"),
+]  # fmt: skip
+
+
+def to_english(text):
+    """Swap the Telugu and Kannada words we know for their English equivalents."""
+    for phrase, english in OTHER_LANGUAGES:
+        if phrase in text:
+            text = text.replace(phrase, f" {english} ")
+    return text
+
+
 def normalise(text):
     """Lower-case, strip punctuation and turn every way of writing an amount into plain
     digits: "1,500", "Rs.1500", "2k", "1.5 lakh", "two thousand six hundred", "2000 600"."""
-    text = re.sub(r"(?<=\d),(?=\d)", "", text.lower())  # 1,500 and 2,00,600
+    text = re.sub(r"(?<=\d),(?=\d)", "", to_english(text).lower())  # 1,500 and 2,00,600
     text = re.sub(r"\b(?:rs|inr)\.?\s*(?=\d)|₹\s*", " ", text)
     text = re.sub(r"[^a-z0-9.' ]+", " ", text)
     text = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", text)  # a full stop is not a decimal point

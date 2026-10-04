@@ -906,10 +906,98 @@ const AGENT_SECTIONS = {
   map: "map", activity: "dayGrid", busy: "busyForm", history: "historyBody", feed: "feed",
   zones: "zoneCompareBody", goal: "goalCard", recommendation: "recAction",
 };
-const AGENT_CHIPS = [
-  "Set my goal to 1500 in 6 hours", "Where should I go?", "Charminar is busy, take me there",
-  "How much have I earned?",
+// ---- languages: English, Telugu, Kannada ---------------------------------
+// The agent listens, replies and narrates its steps in the chosen language.
+// Each entry: the English text (as a pattern), then its Telugu and Kannada forms.
+const SPEECH_CODE = { en: "en-IN", te: "te-IN", kn: "kn-IN" };
+const RUPEES = { en: "rupees", te: "రూపాయలు", kn: "ರೂಪಾಯಿ" };
+const AGENT_CHIPS = {
+  en: ["Set my goal to 1500 in 6 hours", "Where should I go?", "Charminar is busy, take me there",
+    "How much have I earned?"],
+  te: ["నా లక్ష్యం 1500, 6 గంటల్లో", "ఎక్కడికి వెళ్ళాలి?",
+    "Charminar బిజీగా ఉంది, నన్ను అక్కడికి తీసుకెళ్ళు", "ఎంత సంపాదించాను?"],
+  kn: ["ನನ್ನ ಗುರಿ 1500, 6 ಗಂಟೆಗಳಲ್ಲಿ", "ಎಲ್ಲಿಗೆ ಹೋಗಬೇಕು?",
+    "Charminar ಬ್ಯುಸಿ ಇದೆ, ನನ್ನನ್ನು ಅಲ್ಲಿಗೆ ಕರೆದುಕೊಂಡು ಹೋಗು", "ಎಷ್ಟು ಗಳಿಸಿದ್ದೇನೆ?"],
+};
+const TRANSLATIONS = [
+  [/^Thinking about: (.*)$/, "ఆలోచిస్తున్నాను: $1", "ಯೋಚಿಸುತ್ತಿದ್ದೇನೆ: $1"],
+  [/^Reading your current status$/, "మీ ప్రస్తుత స్థితిని చూస్తున్నాను", "ನಿಮ್ಮ ಈಗಿನ ಸ್ಥಿತಿಯನ್ನು ನೋಡುತ್ತಿದ್ದೇನೆ"],
+  [/^Opening the goal form$/, "లక్ష్యం ఫారం తెరుస్తున్నాను", "ಗುರಿ ಫಾರ್ಮ್ ತೆರೆಯುತ್ತಿದ್ದೇನೆ"],
+  [/^Typing the target: Rs (.*)$/, "లక్ష్యం టైప్ చేస్తున్నాను: Rs $1", "ಗುರಿ ಟೈಪ್ ಮಾಡುತ್ತಿದ್ದೇನೆ: Rs $1"],
+  [/^Setting the hours: (.*)$/, "గంటలు సెట్ చేస్తున్నాను: $1", "ಗಂಟೆಗಳನ್ನು ಹೊಂದಿಸುತ್ತಿದ್ದೇನೆ: $1"],
+  [/^Choosing the vehicle: (.*)$/, "వాహనం ఎంచుకుంటున్నాను: $1", "ವಾಹನ ಆಯ್ಕೆ ಮಾಡುತ್ತಿದ್ದೇನೆ: $1"],
+  [/^Pressing (.*)$/, "$1 నొక్కుతున్నాను", "$1 ಒತ್ತುತ್ತಿದ್ದೇನೆ"],
+  [/^Accepting the recommendation$/, "సిఫార్సును అంగీకరిస్తున్నాను", "ಶಿಫಾರಸನ್ನು ಒಪ್ಪಿಕೊಳ್ಳುತ್ತಿದ್ದೇನೆ"],
+  [/^Ignoring the recommendation$/, "సిఫార్సును విస్మరిస్తున్నాను", "ಶಿಫಾರಸನ್ನು ನಿರ್ಲಕ್ಷಿಸುತ್ತಿದ್ದೇನೆ"],
+  [/^Recommendation answered$/, "సిఫార్సుకు సమాధానం ఇచ్చారు", "ಶಿಫಾರಸಿಗೆ ಉತ್ತರಿಸಲಾಗಿದೆ"],
+  [/^Cancelling the move$/, "ప్రయాణాన్ని రద్దు చేస్తున్నాను", "ಪ್ರಯಾಣವನ್ನು ರದ್ದುಮಾಡುತ್ತಿದ್ದೇನೆ"],
+  [/^Ending the shift$/, "షిఫ్ట్ ముగిస్తున్నాను", "ಶಿಫ್ಟ್ ಮುಗಿಸುತ್ತಿದ್ದೇನೆ"],
+  [/^Typing the busy place: (.*)$/, "రద్దీ ప్రదేశం టైప్ చేస్తున్నాను: $1", "ಜನಸಂದಣಿ ಸ್ಥಳ ಟೈಪ್ ಮಾಡುತ್ತಿದ್ದೇನೆ: $1"],
+  [/^Busy place is set$/, "రద్దీ ప్రదేశం సెట్ అయింది", "ಜನಸಂದಣಿ ಸ್ಥಳ ಹೊಂದಿಸಲಾಗಿದೆ"],
+  [/^Waiting for a busy place$/, "రద్దీ ప్రదేశం కోసం వేచి ఉన్నాను", "ಜನಸಂದಣಿ ಸ್ಥಳಕ್ಕಾಗಿ ಕಾಯುತ್ತಿದ್ದೇನೆ"],
+  [/^Clearing the busy place$/, "రద్దీ ప్రదేశాన్ని తొలగిస్తున్నాను", "ಜನಸಂದಣಿ ಸ್ಥಳವನ್ನು ತೆಗೆಯುತ್ತಿದ್ದೇನೆ"],
+  [/^Reading the busiest places$/, "అత్యంత రద్దీ ప్రదేశాలను చూస్తున్నాను", "ಹೆಚ್ಚು ಜನಸಂದಣಿಯ ಸ್ಥಳಗಳನ್ನು ನೋಡುತ್ತಿದ್ದೇನೆ"],
+  [/^Finding (.*) on the map$/, "మ్యాప్‌లో $1 వెతుకుతున్నాను", "ನಕ್ಷೆಯಲ್ಲಿ $1 ಹುಡುಕುತ್ತಿದ್ದೇನೆ"],
+  [/^Comparing the zones$/, "జోన్లను పోల్చుతున్నాను", "ವಲಯಗಳನ್ನು ಹೋಲಿಸುತ್ತಿದ್ದೇನೆ"],
+  [/^Reading your earnings activity$/, "మీ సంపాదన వివరాలు చూస్తున్నాను", "ನಿಮ್ಮ ಗಳಿಕೆಯ ವಿವರ ನೋಡುತ್ತಿದ್ದೇನೆ"],
+  [/^Reading your latest orders$/, "మీ తాజా ఆర్డర్లు చూస్తున్నాను", "ನಿಮ್ಮ ಇತ್ತೀಚಿನ ಆರ್ಡರ್‌ಗಳನ್ನು ನೋಡುತ್ತಿದ್ದೇನೆ"],
+  [/^Opening Google Maps directions$/, "Google Maps దారి తెరుస్తున్నాను", "Google Maps ದಾರಿ ತೆರೆಯುತ್ತಿದ್ದೇನೆ"],
+  [/^Showing (.*)$/, "$1 చూపిస్తున్నాను", "$1 ತೋರಿಸುತ್ತಿದ್ದೇನೆ"],
+  [/^Choosing (.*)$/, "$1 ఎంచుకుంటున్నాను", "$1 ಆಯ್ಕೆ ಮಾಡುತ್ತಿದ್ದೇನೆ"],
+  [/^Triggering the demo event$/, "డెమో ఈవెంట్ ప్రారంభిస్తున్నాను", "ಡೆಮೊ ಈವೆಂಟ್ ಪ್ರಾರಂಭಿಸುತ್ತಿದ್ದೇನೆ"],
+  [/^Updating your location$/, "మీ లొకేషన్ అప్‌డేట్ చేస్తున్నాను", "ನಿಮ್ಮ ಸ್ಥಳವನ್ನು ನವೀಕರಿಸುತ್ತಿದ್ದೇನೆ"],
+  [/^Logging out$/, "లాగ్ అవుట్ చేస్తున్నాను", "ಲಾಗ್ ಔಟ್ ಮಾಡುತ್ತಿದ್ದೇನೆ"],
+  [/^Checking with you before changing anything$/, "ఏదైనా మార్చే ముందు మిమ్మల్ని అడుగుతున్నాను",
+    "ಏನನ್ನಾದರೂ ಬದಲಿಸುವ ಮೊದಲು ನಿಮ್ಮನ್ನು ಕೇಳುತ್ತಿದ್ದೇನೆ"],
+  [/^Tell the agent what to do - it will work the screen for you$/,
+    "ఏం చేయాలో ఏజెంట్‌కు చెప్పండి - అది మీ కోసం స్క్రీన్‌పై పని చేస్తుంది",
+    "ಏನು ಮಾಡಬೇಕೆಂದು ಏಜೆಂಟ್‌ಗೆ ಹೇಳಿ - ಅದು ನಿಮಗಾಗಿ ಪರದೆಯ ಮೇಲೆ ಕೆಲಸ ಮಾಡುತ್ತದೆ"],
+  [/^Listening\.\.\.$/, "వింటున్నాను...", "ಕೇಳುತ್ತಿದ್ದೇನೆ..."],
+  [/^I could not reach GigPilot\. Is the server running\?$/,
+    "GigPilot‌ను చేరుకోలేకపోయాను. సర్వర్ నడుస్తోందా?", "GigPilot ತಲುಪಲು ಆಗಲಿಲ್ಲ. ಸರ್ವರ್ ಚಾಲನೆಯಲ್ಲಿದೆಯೇ?"],
+  [/^I need microphone permission to hear you\. Allow it in the browser, or type instead\.$/,
+    "మీ మాట వినడానికి మైక్రోఫోన్ అనుమతి కావాలి. బ్రౌజర్‌లో అనుమతించండి, లేదా టైప్ చేయండి.",
+    "ನಿಮ್ಮ ಮಾತು ಕೇಳಲು ಮೈಕ್ರೊಫೋನ್ ಅನುಮತಿ ಬೇಕು. ಬ್ರೌಸರ್‌ನಲ್ಲಿ ಅನುಮತಿಸಿ, ಅಥವಾ ಟೈಪ್ ಮಾಡಿ."],
+  [/^I could not hear that\. Try again, or type it\.$/,
+    "అది వినపడలేదు. మళ్ళీ ప్రయత్నించండి, లేదా టైప్ చేయండి.", "ಅದು ಕೇಳಿಸಲಿಲ್ಲ. ಮತ್ತೆ ಪ್ರಯತ್ನಿಸಿ, ಅಥವಾ ಟೈಪ್ ಮಾಡಿ."],
+  [/^New chat started\. What should I do\?$/, "కొత్త చాట్ మొదలైంది. నేను ఏం చేయాలి?",
+    "ಹೊಸ ಚಾಟ್ ಆರಂಭವಾಗಿದೆ. ನಾನು ಏನು ಮಾಡಬೇಕು?"],
+  [/^The AI agent is unavailable right now \((.*)\), so this was handled in basic mode, which answers in English\.$/,
+    "AI ఏజెంట్ ఇప్పుడు అందుబాటులో లేదు ($1). అందుకే బేసిక్ మోడ్‌లో చేశాను; అది ఇంగ్లీష్‌లో సమాధానం ఇస్తుంది.",
+    "AI ಏಜೆಂಟ್ ಈಗ ಲಭ್ಯವಿಲ್ಲ ($1). ಆದ್ದರಿಂದ ಬೇಸಿಕ್ ಮೋಡ್‌ನಲ್ಲಿ ಮಾಡಿದೆ; ಅದು ಇಂಗ್ಲಿಷ್‌ನಲ್ಲಿ ಉತ್ತರಿಸುತ್ತದೆ."],
+  [/^This device has no voice for this language, so replies are shown but not spoken\.$/,
+    "ఈ పరికరంలో తెలుగు వాయిస్ లేదు, కాబట్టి సమాధానాలు కనిపిస్తాయి కానీ వినిపించవు.",
+    "ಈ ಸಾಧನದಲ್ಲಿ ಕನ್ನಡ ಧ್ವನಿ ಇಲ್ಲ, ಆದ್ದರಿಂದ ಉತ್ತರಗಳು ಕಾಣಿಸುತ್ತವೆ ಆದರೆ ಕೇಳಿಸುವುದಿಲ್ಲ."],
+  [/^Run$/, "నడుపు", "ನಡೆಸು"],
+  [/^Skip$/, "దాటవేయి", "ಬಿಟ್ಟುಬಿಡು"],
 ];
+let agentLang = "en";
+try { agentLang = localStorage.getItem("gigpilot_lang") || "en"; } catch (err) { /* private window */ }
+if (!SPEECH_CODE[agentLang]) agentLang = "en";
+
+// English text -> the same text in the agent's current language.
+function loc(text) {
+  if (agentLang === "en") return text;
+  for (const [pattern, te, kn] of TRANSLATIONS) {
+    if (pattern.test(text)) return text.replace(pattern, agentLang === "te" ? te : kn);
+  }
+  return text;
+}
+
+function applyAgentLanguage() {
+  $("asstLang").value = agentLang;
+  $("asstInput").placeholder = loc("Tell the agent what to do - it will work the screen for you");
+  $("asstSend").textContent = loc("Run");
+  $("agentStop").textContent = loc("Skip");
+  $("asstChips").innerHTML = "";
+  AGENT_CHIPS[agentLang].forEach((text) => {
+    const chip = el("button", text, "asst-chip");
+    chip.type = "button";
+    chip.addEventListener("click", () => agentRun(text));
+    $("asstChips").appendChild(chip);
+  });
+}
+
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
 let listening = false;
@@ -921,7 +1009,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, agentSkip ? 0
 const isShown = (node) => Boolean(node) && node.offsetParent !== null;
 
 function setStep(text) {
-  $("agentStep").textContent = text;
+  $("agentStep").textContent = loc(text);
 }
 
 // Bring an element into view, send the pointer to it and ring it.
@@ -1157,11 +1245,24 @@ function showReply(text, link) {
   replyTimer = setTimeout(() => box.classList.add("hidden"), link ? 30000 : 14000);
 }
 
-function speak(text) {
+const noVoiceTold = {};
+function speak(text, lang) {
   if (!$("asstSpeak").checked || !window.speechSynthesis) return;
   window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text.replace(/\bRs\b/g, "rupees"));
-  utterance.lang = "en-IN";
+  const code = SPEECH_CODE[lang] || "en-IN";
+  const voices = window.speechSynthesis.getVoices();
+  const voice = voices.find((v) => v.lang.replace("_", "-").toLowerCase().startsWith(code.slice(0, 2)));
+  if (!voice && lang !== "en" && voices.length) {
+    // reading Telugu or Kannada with an English voice is gibberish: say nothing instead
+    if (!noVoiceTold[lang]) {
+      noVoiceTold[lang] = true;
+      agentLog(loc("This device has no voice for this language, so replies are shown but not spoken."), "bot");
+    }
+    return;
+  }
+  const utterance = new SpeechSynthesisUtterance(text.replace(/\bRs\b\.?/g, RUPEES[lang] || "rupees"));
+  utterance.lang = code;
+  if (voice) utterance.voice = voice;
   window.speechSynthesis.speak(utterance);
 }
 
@@ -1187,17 +1288,17 @@ async function agentRun(text) {
   agentHold = true; // freeze the page now, so changes appear only as each step is shown
   let result;
   try {
-    result = await apiPost("/api/assistant", { text }, true);
+    result = await apiPost("/api/assistant", { text, lang: agentLang }, true);
   } catch (err) {
     agentHold = false;
     agentWorking(false);
-    showReply("I could not reach GigPilot. Is the server running?");
+    showReply(loc("I could not reach GigPilot. Is the server running?"));
     return;
   }
   showEngine(result.engine);
   if (result.problem && result.problem !== lastProblem) {
-    agentLog("The AI agent is unavailable right now (" + result.problem + "), so this was " +
-      "handled in basic mode.", "bot");
+    agentLog(loc("The AI agent is unavailable right now (" + result.problem + "), so this was " +
+      "handled in basic mode, which answers in English."), "bot");
   }
   lastProblem = result.problem;
 
@@ -1215,7 +1316,7 @@ async function agentRun(text) {
   agentWorking(false);
   agentLog(result.reply, "bot", link);
   showReply(result.reply, link);
-  speak(result.reply);
+  speak(result.reply, result.lang || "en");
   if (result.actions.some((action) => action.type === "logout") &&
       !result.trace.some((step) => step.tool === "log_out")) {
     setTimeout(() => $("logoutBtn").click(), 1200);
@@ -1236,14 +1337,7 @@ function resetAgent() {
 }
 
 function initAgent() {
-  if (!$("asstChips").children.length) {
-    AGENT_CHIPS.forEach((text) => {
-      const chip = el("button", text, "asst-chip");
-      chip.type = "button";
-      chip.addEventListener("click", () => agentRun(text));
-      $("asstChips").appendChild(chip);
-    });
-  }
+  applyAgentLanguage();
   if (!Recognition) {
     $("asstMic").disabled = true;
     $("asstMic").title = "Voice needs Chrome or Edge";
@@ -1266,7 +1360,15 @@ $("asstNew").addEventListener("click", async () => {
   try { await apiPost("/api/assistant/reset", undefined, true); } catch (err) { /* offline */ }
   $("asstLog").innerHTML = "";
   $("asstChips").classList.remove("hidden");
-  showReply("New chat started. What should I do?");
+  showReply(loc("New chat started. What should I do?"));
+});
+
+$("asstLang").addEventListener("change", () => {
+  agentLang = $("asstLang").value;
+  try { localStorage.setItem("gigpilot_lang", agentLang); } catch (err) { /* private window */ }
+  if (recognition && listening) recognition.stop();
+  applyAgentLanguage();
+  $("asstChips").classList.remove("hidden");
 });
 
 $("asstMic").addEventListener("click", () => {
@@ -1277,13 +1379,13 @@ $("asstMic").addEventListener("click", () => {
   }
   if (window.speechSynthesis) window.speechSynthesis.cancel();
   recognition = new Recognition();
-  recognition.lang = "en-IN";
+  recognition.lang = SPEECH_CODE[agentLang]; // listen in the chosen language
   recognition.interimResults = true;
   let heard = "";
   recognition.onstart = () => {
     listening = true;
     $("asstMic").classList.add("listening");
-    $("asstInput").placeholder = "Listening...";
+    $("asstInput").placeholder = loc("Listening...");
   };
   recognition.onresult = (event) => {
     heard = Array.from(event.results).map((r) => r[0].transcript).join(" ");
@@ -1291,16 +1393,16 @@ $("asstMic").addEventListener("click", () => {
   };
   recognition.onerror = (event) => {
     const denied = event.error === "not-allowed" || event.error === "service-not-allowed";
-    showReply(
+    showReply(loc(
       denied
         ? "I need microphone permission to hear you. Allow it in the browser, or type instead."
         : "I could not hear that. Try again, or type it."
-    );
+    ));
   };
   recognition.onend = () => {
     listening = false;
     $("asstMic").classList.remove("listening");
-    $("asstInput").placeholder = "Tell the agent what to do - it will work the screen for you";
+    $("asstInput").placeholder = loc("Tell the agent what to do - it will work the screen for you");
     if (heard.trim()) {
       $("asstInput").value = "";
       agentRun(heard);

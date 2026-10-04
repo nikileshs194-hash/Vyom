@@ -35,6 +35,8 @@ HISTORY_ITEMS = 40
 TIMEOUT_SECONDS = 40
 ENV_FILE = Path(__file__).parent / ".env"
 
+LANGUAGES = {"en": "English", "te": "Telugu", "kn": "Kannada"}
+
 SECTIONS = ["map", "activity", "busy", "history", "feed", "zones", "goal", "recommendation"]
 
 
@@ -178,6 +180,13 @@ How to work:
 - If a tool returns an error or "changed": false, the action did NOT happen. Never say it did.
 - The rider stays in control: accept or ignore a recommendation, end the shift or log out
   only when they have asked for it.
+- Language: riders speak English, Telugu or Kannada, often mixed, sometimes in Roman
+  letters. Understand all of them. Each rider message names the language to reply in:
+  always answer in that language, in its own script (Telugu script for Telugu, Kannada
+  script for Kannada), in simple everyday words a delivery rider would use.
+  Tool arguments are never translated: pass zone and place names exactly as they appear in
+  the lists below, in English. In replies, keep zone and place names recognisable and write
+  amounts with digits, as "Rs 1,200".
 - Replies are read aloud while the rider is on the road: one to three short sentences, plain
   words, no lists, no markdown. Amounts are in rupees, written "Rs 1,200".
 - Orders, payouts and busy scores are demo data standing in for delivery-platform data. Do
@@ -288,7 +297,7 @@ class Agent:
         ]
         return " ".join(p.strip() for p in parts if p.strip())
 
-    def run(self, user, text, execute, status=None):
+    def run(self, user, text, execute, status=None, lang="en"):
         """Carry out one instruction. `execute(user, tool_name, arguments)` runs a tool and
         returns (result dict for the model, list of page actions). `status` is a snapshot of
         the rider's situation, sent along so the model need not spend a turn asking for it.
@@ -297,10 +306,10 @@ class Agent:
         uid = user["id"]
         items = list(self.histories.get(uid, []))
         asked = {"type": "user_input", "content": text}
+        notes = [f"[Reply in {LANGUAGES.get(lang, 'English')}.]"]
         if status is not None:
-            asked["content"] = (
-                f"{text}\n\n[GigPilot status right now: {json.dumps(status, default=str)}]"
-            )
+            notes.append(f"[GigPilot status right now: {json.dumps(status, default=str)}]")
+        asked["content"] = text + "\n\n" + "\n".join(notes)
         items.append(asked)
         actions, trace, reply = [], [], None
 

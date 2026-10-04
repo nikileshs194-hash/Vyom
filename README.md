@@ -42,7 +42,7 @@ those numbers, never invent them.
 | Map and navigation | OpenStreetMap tiles; directions open in Google Maps | **Real** |
 | Accounts, goals, earnings, decisions | SQLite database, one set of data per user | **Real** |
 | Road congestion | Rush-hour model + rain. Becomes real if you set a free [TomTom](https://developer.tomtom.com) key in the `TOMTOM_API_KEY` environment variable | Estimated by default |
-| Orders, payouts, incentives, demand history | This is the data a partner such as Swiggy or Zomato would supply. Until then it is generated: about 140,000 orders over 28 days across 32 zones, from one consistent demand model | Stand-in |
+| Orders, payouts, incentives, demand history | This is the data a partner such as Swiggy or Zomato would supply. Until then it is generated: about 295,000 orders over 60 days across 32 zones, from one consistent demand model | Stand-in |
 
 The status bar shows a badge for each source. If a live source cannot be
 reached, GigPilot falls back to a built-in estimate and keeps running.
@@ -66,22 +66,23 @@ Set the `GIGPILOT_DB` environment variable to keep the file somewhere else.
 
 Instead of charts, GigPilot shows activity boxes:
 
-- **Daily activity** — one box per day for the last 18 weeks, darker = more earned
+- **Daily activity** — one box per day for the last 26 weeks, darker = more earned
 - **When you earn** — one row per day, one box per hour, for the last 7 days,
   with your best and slowest hour
 - **Where you earned** — earnings per zone over the last 7 days
-- **Partner apps** — earnings per app (Swiggy, Zomato, Zepto, Blinkit) and the latest
+- **Partner apps** — earnings per app (Swiggy, Zomato, Zepto, Blinkit, Swiggy Instamart,
+  BigBasket) and the latest
   orders with merchant, zone and distance
 
 Nothing is entered by hand. Every order carries the app it came through, and the
-first time GigPilot learns which zone a rider works in, it syncs about 18 weeks of
-their past orders (around 1,700) into their account. Both the live orders and that
+first time GigPilot learns which zone a rider works in, it syncs about 26 weeks of
+their past shifts and orders (around 140 shifts and 2,000 orders) into their account. Both the live orders and that
 history are generated in `website/backend/partners.py`, standing in for the feed the
 delivery platforms would provide.
 
 ## Busy places
 
-`website/backend/places.py` is a dataset of 41 well-known busy spots in
+`website/backend/places.py` is a dataset of 95 well-known busy spots in
 Hyderabad (malls, food streets, markets, office parks, transit hubs) with
 approximate coordinates and an estimated busy score. Each zone's baseline
 popularity comes from the places inside it. On the site you can set which
@@ -102,6 +103,15 @@ or button, types, presses and scrolls, and the page updates as it goes.
 It then replies in a card above the bar (and aloud, if "Speak replies" is
 ticked). **Skip** finishes the remaining steps at once. The speech-bubble
 button opens the full conversation.
+
+**Three languages.** The selector in the bar switches the agent between
+English, Telugu (తెలుగు) and Kannada (ಕನ್ನಡ). In the chosen language it
+listens to speech, understands typed instructions, replies, narrates its
+steps and speaks the reply. With the Gemini key this covers free-form
+speech in all three, including mixed language. Without a key, the built-in
+rules understand a small set of common Telugu and Kannada words and reply
+in English. Spoken replies in Telugu or Kannada need a voice for that
+language installed on the device.
 
 The actions themselves are carried out on the server; the pointer shows
 what was done, in the order it was done.

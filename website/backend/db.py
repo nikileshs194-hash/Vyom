@@ -262,6 +262,58 @@ def is_synced(user_id):
     return bool(row and row["synced"])
 
 
+def sync_version(user_id):
+    row = _one("SELECT synced FROM users WHERE id = ?", (user_id,))
+    return int(row["synced"]) if row else 0
+
+
+def add_synced_shifts(user_id, shifts, version):
+    """Store a rider's past shifts and their orders from the partner apps."""
+    with _lock:
+        for shift in shifts:
+            cur = _conn.execute(
+                "INSERT INTO shifts (user_id, started_at, ended_at, target_earnings, "
+                "available_hours, vehicle, base_earned, base_hours) VALUES (?, ?, ?, ?, ?, ?, 0, 0)",
+                (user_id, stamp(shift["started_at"]), stamp(shift["ended_at"]),
+                 shift["target_earnings"], shift["available_hours"], shift["vehicle"]),
+            )  # fmt: skip
+            _conn.executemany(
+                "INSERT INTO earnings (user_id, shift_id, ts, amount, zone_id, kind, note, "
+                "platform, merchant, distance_km) VALUES (?, ?, ?, ?, ?, 'order', ?, ?, ?, ?)",
+                [
+                    (user_id, cur.lastrowid, stamp(o["ts"]), o["amount"], o["zone_id"],
+                     o["note"], o["platform"], o["merchant"], o["distance_km"])
+                    for o in shift["orders"]
+                ],
+            )  # fmt: skip
+        _conn.execute("UPDATE users SET synced = ? WHERE id = ?", (version, user_id))
+        _conn.commit()
+
+
+def unlinked_order_days(user_id):
+    """Days that have synced orders but no shift to hang them on (older accounts)."""
+    return _all(
+        "SELECT substr(ts, 1, 10) AS day, MIN(ts) AS first, MAX(ts) AS last FROM earnings "
+        "WHERE user_id = ? AND shift_id IS NULL AND kind = 'order' GROUP BY day ORDER BY day",
+        (user_id,),
+    )
+
+
+def link_day_to_shift(user_id, day, started_at, ended_at, target, hours, vehicle):
+    with _lock:
+        cur = _conn.execute(
+            "INSERT INTO shifts (user_id, started_at, ended_at, target_earnings, "
+            "available_hours, vehicle, base_earned, base_hours) VALUES (?, ?, ?, ?, ?, ?, 0, 0)",
+            (user_id, stamp(started_at), stamp(ended_at), target, hours, vehicle),
+        )
+        _conn.execute(
+            "UPDATE earnings SET shift_id = ? WHERE user_id = ? AND shift_id IS NULL "
+            "AND kind = 'order' AND substr(ts, 1, 10) = ?",
+            (cur.lastrowid, user_id, day),
+        )
+        _conn.commit()
+
+
 def add_synced_orders(user_id, orders):
     """Store a rider's order history from the partner apps, once."""
     with _lock:
