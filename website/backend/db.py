@@ -75,6 +75,15 @@ CREATE TABLE IF NOT EXISTS locations (
     zone_id TEXT
 );
 CREATE INDEX IF NOT EXISTS locations_user_ts ON locations(user_id, ts);
+CREATE TABLE IF NOT EXISTS agent_log (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    ts TEXT NOT NULL,
+    said TEXT NOT NULL,
+    engine TEXT NOT NULL,
+    steps TEXT NOT NULL,
+    reply TEXT NOT NULL
+);
 """
 
 _lock = threading.RLock()
@@ -331,6 +340,23 @@ def add_decision(user_id, when, action, outcome, confidence):
 def decisions(user_id, limit=50):
     return _all(
         "SELECT ts, action, outcome, confidence FROM decisions WHERE user_id = ? "
+        "ORDER BY id DESC LIMIT ?",
+        (user_id, limit),
+    )
+
+
+def add_agent_log(user_id, when, said, engine, steps, reply):
+    """What a rider told the agent, what it did and what it answered - kept so a wrong
+    result can be traced back to the instruction that caused it."""
+    _run(
+        "INSERT INTO agent_log (user_id, ts, said, engine, steps, reply) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, stamp(when), said, engine, steps, reply),
+    )
+
+
+def agent_log(user_id, limit=20):
+    return _all(
+        "SELECT ts, said, engine, steps, reply FROM agent_log WHERE user_id = ? "
         "ORDER BY id DESC LIMIT ?",
         (user_id, limit),
     )

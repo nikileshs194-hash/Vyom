@@ -54,6 +54,7 @@ function hideToast() {
 
 function errorDetail(body) {
   if (typeof body.detail === "string") return body.detail;
+  if (body.detail && typeof body.detail.message === "string") return body.detail.message;
   if (Array.isArray(body.detail) && body.detail.length) {
     const d = body.detail[0];
     const field = d.loc && d.loc.length > 1 ? d.loc[d.loc.length - 1] + ": " : "";
@@ -79,11 +80,16 @@ async function apiFetch(path, options, silent) {
   }
   if (!res.ok) {
     let detail = "Check your inputs.";
+    let code = null;
     try {
-      detail = errorDetail(await res.json());
+      const body = await res.json();
+      detail = errorDetail(body);
+      code = body.detail && body.detail.code;
     } catch (err) { /* non-JSON error body, keep the generic message */ }
     const error = new Error(detail);
     error.status = res.status;
+    error.code = code;
+    if (code === "confirm_goal") throw error; // the caller asks the rider before retrying
     if (!silent) showToast(detail, true);
     throw error;
   }
@@ -977,6 +983,13 @@ const zoneNamed = (name) =>
 // One tool the agent used -> the same thing acted out on the page.
 async function actOut(step) {
   const a = step.args || {};
+  if (step.ok === false) {
+    // the step did not go through (for example a goal that needs confirming): show nothing
+    // being changed, rather than acting out something that did not happen
+    setStep("Checking with you before changing anything");
+    await pause(900);
+    return;
+  }
   switch (step.tool) {
     case "get_status":
       await lookAt(isShown($("kpis")) ? $("kpis") : document.querySelector(".here-card"),
@@ -1324,7 +1337,14 @@ $("startBtn").addEventListener("click", async () => {
     body.earned_so_far = 0;
     body.hours_elapsed = 0;
   }
-  await apiPost("/api/goal", body);
+  try {
+    await apiPost("/api/goal", body);
+  } catch (err) {
+    if (err.code !== "confirm_goal") throw err;
+    // an amount that needs an impossible pace is usually a typing slip: ask first
+    if (!window.confirm(err.message + "\n\nSet this goal anyway?")) return;
+    await apiPost("/api/goal", { ...body, confirmed: true });
+  }
   goalEditing = false;
   await poll();
 });

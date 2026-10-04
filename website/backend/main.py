@@ -43,6 +43,10 @@ from world import World
 SNOOZE_MINUTES = 20  # how long an ignored zone stays out of the recommendations
 WEATHER_REFRESH_SECONDS = 600
 SERVICE_RADIUS_KM = 8  # further than this from every zone = outside the service area
+# Above this a goal is almost certainly a slip (an extra digit, a misheard number): the
+# best surge zones pay about Rs 500 an hour. Such a goal is set only once confirmed.
+MAX_PLAUSIBLE_RATE = 600
+PENDING_GOALS = {}  # user_id -> a goal waiting for the rider to say "yes" (rule-based mode)
 COARSE_FIX_METRES = 5000  # a fix this vague is a network guess, not GPS; it jumps around
 TRAIL_MIN_METRES = 30  # store a new location point only after moving this far...
 TRAIL_MAX_SECONDS = 120  # ...or after this long
@@ -198,6 +202,7 @@ class GoalIn(BaseModel):
     # When changing the goal of a running shift: how many hours from NOW to keep working.
     # "Set my goal to 800 in 1 hour" means one more hour, however long the shift has run.
     hours_left: Optional[float] = Field(default=None, gt=0, le=24)
+    confirmed: bool = False  # the rider has confirmed a goal that looks unrealistic
 
     @model_validator(mode="after")
     def elapsed_within_available(self):
@@ -493,6 +498,22 @@ def set_location_zone(body: ZoneEventIn, user=Depends(current_user)):
 # ---------------- the rider's shift ----------------
 
 
+def check_goal_is_plausible(goal, earned, hours_left):
+    """Stop a goal that needs an impossible pace, unless the rider has confirmed it."""
+    needed = (goal.target_earnings - earned) / max(hours_left, 0.25)
+    if needed > MAX_PLAUSIBLE_RATE and not goal.confirmed:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "confirm_goal",
+                "needed_per_hour": round(needed),
+                "message": f"Rs {goal.target_earnings:,.0f} in {hours_left:g} hours needs "
+                f"Rs {needed:,.0f} an hour. Riders here make about Rs 100 to Rs 500 an hour, "
+                "so that amount looks like a slip.",
+            },
+        )
+
+
 @app.post("/api/goal")
 def set_goal(goal: GoalIn, user=Depends(current_user)):
     with LOCK:
@@ -512,6 +533,7 @@ def set_goal(goal: GoalIn, user=Depends(current_user)):
                         detail=f"Hours available cannot be less than the {worked:.1f} hours "
                         "already worked",
                     )
+                check_goal_is_plausible(goal, rider["earned"], round(total - worked, 1))
                 rider.update(
                     target_earnings=goal.target_earnings,
                     available_hours=total,
@@ -523,6 +545,7 @@ def set_goal(goal: GoalIn, user=Depends(current_user)):
                     WORLD.log_rider(rider, "shift", "Shift extended")
                 WORLD._step_rider(rider)
                 return {"ok": True, "updated": True}
+        check_goal_is_plausible(goal, goal.earned_so_far, goal.available_hours - goal.hours_elapsed)
         shift = goal.model_dump()
         shift["id"] = db.start_shift(user["id"], shift, WORLD.now)
         shift.update(
@@ -887,12 +910,21 @@ def suggestion_text(rec):
     return f"{rec['action']}. Expected {money(rec['net_rate_low'])} to {money(rec['net_rate_high'])} an hour."
 
 
-def run_intent(user, intent):
-    """Carry out one assistant intent. Returns (reply, actions for the page)."""
+def run_intent(user, intent, confirm_by_yes=True):
+    """Carry out one assistant intent. Returns (reply, actions for the page). An intent
+    that was meant to change something but returns no actions did not go through.
+    `confirm_by_yes`: in rule-based mode a goal that needs confirming is remembered, and a
+    following "yes" sets it. The AI agent confirms through its own tool argument instead."""
     kind = intent["intent"]
     uid = user["id"]
     rider = WORLD.riders.get(uid)
     refresh = [{"type": "refresh"}]
+
+    pending = PENDING_GOALS.pop(uid, None) if confirm_by_yes else None
+    if pending and kind == "accept":  # "yes" to the goal GigPilot questioned a moment ago
+        intent.clear()
+        intent.update(intent="set_goal", confirmed=True, **pending)
+        kind = "set_goal"
     needs_shift = "Set a goal first - for example, say: set my goal to 1000 in 6 hours."
 
     if kind == "help":
@@ -926,9 +958,20 @@ def run_intent(user, intent):
             # hours in an instruction are counted from now, not from the start of the shift
             goal["hours_left"] = intent["available_hours"]
             goal["available_hours"] = rider["available_hours"]
+        goal["confirmed"] = bool(intent.get("confirmed"))
         try:
             set_goal(GoalIn(**goal), user)
         except HTTPException as exc:
+            if isinstance(exc.detail, dict) and exc.detail.get("code") == "confirm_goal":
+                if confirm_by_yes:
+                    PENDING_GOALS[uid] = {k: intent[k] for k in
+                                          ("target_earnings", "available_hours", "vehicle")
+                                          if k in intent}  # fmt: skip
+                return (
+                    exc.detail["message"] + " Nothing was changed. Say yes to set it anyway, "
+                    "or tell me the amount you meant.",
+                    [],
+                )
             return f"I could not set that goal. {exc.detail}.", []
         except ValidationError as exc:
             error = exc.errors()[0]
@@ -1147,7 +1190,9 @@ def execute_tool(user, name, args):
 
 def _execute_tool(user, name, args):
     def via(intent):  # tools that map straight onto an assistant intent
-        reply, actions = run_intent(user, intent)
+        reply, actions = run_intent(user, intent, confirm_by_yes=False)
+        if intent["intent"] in CHANGING_INTENTS and not actions:
+            return {"error": reply, "changed": False}, []  # it did not go through
         return {"result": reply}, actions
 
     def zone_named(text):
@@ -1163,7 +1208,7 @@ def _execute_tool(user, name, args):
         return tool_status(user), []
     if name == "set_goal":
         wanted = {k: args[k] for k in ("target_earnings", "available_hours", "vehicle") if k in args}
-        return via({"intent": "set_goal", **wanted})
+        return via({"intent": "set_goal", "confirmed": args.get("confirmed") is True, **wanted})
     if name == "answer_recommendation":
         if args.get("decision") not in ("accept", "ignore"):
             return {"error": "decision must be accept or ignore"}, []
@@ -1234,6 +1279,12 @@ def _execute_tool(user, name, args):
     return {"error": f"Unknown tool '{name}'."}, []
 
 
+CHANGING_INTENTS = {
+    "set_goal", "accept", "ignore", "cancel_move", "end_shift", "set_busy_place",
+    "clear_busy_place", "traffic", "rain", "incentive", "reset_events", "set_location",
+}
+
+
 def intent_trace(intent):
     """The rule-based assistant's one step, described the way the agent's tools are, so the
     page can show it on screen in the same way."""
@@ -1301,6 +1352,7 @@ def assistant_command(body: AssistantIn, user=Depends(current_user)):
             with LOCK:
                 status = tool_status(user)
             reply, actions, trace = AGENT.run(user, body.text, execute_tool, status)
+            db.add_agent_log(user["id"], real_now(), body.text, "gemini", json.dumps(trace), reply)
             return {"heard": body.text, "engine": "gemini", "reply": reply,
                     "actions": unique(actions), "trace": trace, "problem": None}  # fmt: skip
         except agent.AgentError as exc:
@@ -1311,8 +1363,12 @@ def assistant_command(body: AssistantIn, user=Depends(current_user)):
             reply, actions = run_intent(user, intent)
         except HTTPException as exc:
             reply, actions = str(exc.detail), []
+    # a change that did not go through must not be acted out on the page
+    done = bool(actions) or intent["intent"] not in CHANGING_INTENTS
+    trace = intent_trace(intent) if done else []
+    db.add_agent_log(user["id"], real_now(), body.text, "rules", json.dumps(trace), reply)
     return {"heard": body.text, "engine": "rules", "intent": intent["intent"], "reply": reply,
-            "actions": actions, "trace": intent_trace(intent), "problem": problem}  # fmt: skip
+            "actions": actions, "trace": trace, "problem": problem}  # fmt: skip
 
 
 # Serve the website itself too, so one server on port 8000 is enough.

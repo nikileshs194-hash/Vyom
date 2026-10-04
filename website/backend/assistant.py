@@ -30,17 +30,70 @@ SECTIONS = {
     "recommendation": ("recommendation", "suggestion"),
 }
 VEHICLES = ("bike", "scooter", "car")
-NUMBER_WORDS = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
-    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
-}  # fmt: skip
+# ---- reading amounts the way people say and type them
+UNITS = {w: i for i, w in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
+    "fifteen sixteen seventeen eighteen nineteen".split())}  # fmt: skip
+TENS = {w: 10 * i for i, w in enumerate(
+    "twenty thirty forty fifty sixty seventy eighty ninety".split(), 2)}  # fmt: skip
+SCALES = {"thousand": 1_000, "lakh": 100_000, "lakhs": 100_000, "lac": 100_000,
+          "lacs": 100_000, "crore": 10_000_000, "crores": 10_000_000}  # fmt: skip
+
+
+def words_to_digits(text):
+    """ "two thousand six hundred" -> "2600", "five" -> "5"; everything else is kept."""
+    tokens, out, i = text.split(), [], 0
+    while i < len(tokens):
+        total = current = 0
+        j, seen = i, False
+        while j < len(tokens):
+            word = tokens[j]
+            follows_number = j + 1 < len(tokens) and (tokens[j + 1] in UNITS or tokens[j + 1] in TENS)
+            if word in UNITS:
+                current += UNITS[word]
+            elif word in TENS:
+                current += TENS[word]
+            elif word == "hundred" and seen:
+                current = max(current, 1) * 100
+            elif word in SCALES and seen:
+                total, current = total + max(current, 1) * SCALES[word], 0
+            elif not (word == "and" and seen and follows_number):
+                break
+            seen = True
+            j += 1
+        if seen:
+            out.append(str(total + current))
+            i = j
+        else:
+            out.append(word)
+            i += 1
+    return " ".join(out)
+
+
+def _scale(match):
+    value = float(match.group(1)) * {"k": 1_000, "hundred": 100, **SCALES}[match.group(2)]
+    return str(int(value)) if value.is_integer() else str(value)
+
+
+def _join_split(match):
+    """Speech-to-text often writes "two thousand six hundred" as "2000 600"."""
+    big, small = int(match.group(1)), int(match.group(2))
+    if big >= 1000 and big % 1000 == 0 and 100 <= small < 1000:
+        return str(big + small)
+    return match.group(0)
 
 
 def normalise(text):
-    text = text.lower().replace(",", "")
-    text = re.sub(r"(\d)\s*k\b", r"\g<1>000", text)  # "2k" -> "2000"
+    """Lower-case, strip punctuation and turn every way of writing an amount into plain
+    digits: "1,500", "Rs.1500", "2k", "1.5 lakh", "two thousand six hundred", "2000 600"."""
+    text = re.sub(r"(?<=\d),(?=\d)", "", text.lower())  # 1,500 and 2,00,600
+    text = re.sub(r"\b(?:rs|inr)\.?\s*(?=\d)|₹\s*", " ", text)
     text = re.sub(r"[^a-z0-9.' ]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", text)  # a full stop is not a decimal point
+    text = words_to_digits(re.sub(r"\s+", " ", text).strip())
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(k|hundred|thousand|lakhs?|lacs?|crores?)\b", _scale, text)
+    text = re.sub(r"\b(\d+) (\d+)\b(?! ?(?:hours?|hrs?|h)\b)", _join_split, text)
+    return text
 
 
 def _aliases():
@@ -89,8 +142,6 @@ def _has(text, *patterns):
 
 def _goal_details(text):
     details = {}
-    for word, value in NUMBER_WORDS.items():
-        text = re.sub(rf"\b{word}\b", str(value), text)
     hours = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b", text)
     if hours:
         details["available_hours"] = float(hours.group(1))
@@ -148,10 +199,14 @@ def parse(text):
         return {"intent": "set_goal", **goal}
     if goal and _has(t, "set", "update", "change", "switch"):
         return {"intent": "set_goal", **goal}
+    if "target_earnings" in goal and (
+        "available_hours" in goal or _has(t, "want", "need", "aim", "make it")
+    ):  # "fifteen hundred in six hours", "I want 2500"
+        return {"intent": "set_goal", **goal}
 
     # ---- answering the current suggestion
     if _has(t, "accept", "agree", "yes", "yeah", "okay", "ok", "sure", "go ahead", "do it",
-            "let'?s go", "confirm"):  # fmt: skip
+            "let'?s go", "confirm", "set it anyway", "i am sure", "i'm sure"):  # fmt: skip
         return {"intent": "accept"}
     if _has(t, "ignore", "skip", "reject", "decline", "dismiss", "not now", "no"):
         return {"intent": "ignore"}

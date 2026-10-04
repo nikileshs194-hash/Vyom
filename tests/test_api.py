@@ -371,7 +371,7 @@ def test_goal_already_reached(asha):
 
 
 def test_shift_ends_when_hours_run_out(asha):
-    asha.post("/api/goal", {**GOAL, "hours_elapsed": 5.5})
+    asha.post("/api/goal", {**GOAL, "hours_elapsed": 5.5, "confirmed": True})
     main.WORLD.advance(90)
     data = asha.state()
     assert data["rider"]["status"] == "shift_over"
@@ -427,11 +427,13 @@ def test_hours_in_an_instruction_count_from_now(on_shift):
     assert on_shift.state()["rider"]["orders_done"] >= 2  # the shift was not restarted
 
     main.WORLD.advance(30)
-    assert on_shift.state()["metrics"]["remaining_hours"] == 0.5  # and it counts down
-
-    ask(on_shift, "change my target to 900")  # no hours mentioned: the end time stays put
     m = on_shift.state()["metrics"]
-    assert (m["target_earnings"], m["remaining_hours"], m["available_hours"]) == (900, 0.5, 4.5)
+    assert m["remaining_hours"] == 0.5  # and it counts down
+
+    target = m["earned_so_far"] + 100
+    ask(on_shift, f"change my target to {target}")  # no hours mentioned: the end time stays put
+    m = on_shift.state()["metrics"]
+    assert (m["target_earnings"], m["remaining_hours"], m["available_hours"]) == (target, 0.5, 4.5)
 
     # the goal form sends the same thing when a shift is running
     on_shift.post("/api/goal", {**GOAL, "target_earnings": 700, "hours_left": 3})
@@ -442,7 +444,7 @@ def test_hours_in_an_instruction_count_from_now(on_shift):
 
 def test_adding_hours_to_a_finished_shift_resumes_it(asha):
     asha.post("/api/location", GACHIBOWLI)
-    asha.post("/api/goal", {**GOAL, "hours_elapsed": 5.5})
+    asha.post("/api/goal", {**GOAL, "hours_elapsed": 5.5, "confirmed": True})
     main.WORLD.advance(90)
     assert asha.state()["rider"]["status"] == "shift_over"
     earned = asha.state()["metrics"]["earned_so_far"]
@@ -975,3 +977,104 @@ def test_agent_tool_definitions_are_well_formed(asha):
     assert agent.Agent._trim([{"type": "function_result"}, {"type": "user_input", "content": "a"}]) == [
         {"type": "user_input", "content": "a"}
     ]
+
+
+# ------------------------------------------------- doing exactly what was said
+
+
+@pytest.mark.parametrize(
+    "said, target, hours",
+    [
+        ("set my goal to 2600 in 7 hours", 2600, 7),
+        ("set my goal to two thousand six hundred in seven hours", 2600, 7),
+        ("set goal 2000 600 in 7 hours", 2600, 7),  # how speech-to-text splits it
+        ("target Rs.2,600 for 7 hrs", 2600, 7),
+        ("goal \u20b92600 in 7 hours", 2600, 7),
+        ("make it 2.6k", 2600, None),
+        ("change my target to 2k", 2000, None),
+        ("fifteen hundred in six hours", 1500, 6),
+        ("I want twenty five hundred", 2500, None),
+        ("one thousand two hundred and fifty in 5 hours", 1250, 5),
+        ("set my goal to 1.5 lakh", 150000, None),
+        ("set my goal to 2,00,600 in 7 hours", 200600, 7),
+        ("set goal 1200 6 hours", 1200, 6),  # two separate numbers stay separate
+        ("set my goal to 1500 in 6.5 hours", 1500, 6.5),
+    ],
+)
+def test_amounts_are_read_exactly(said, target, hours):
+    got = assistant.parse(said)
+    assert got["intent"] == "set_goal"
+    assert got["target_earnings"] == target
+    assert got.get("available_hours") == hours
+
+
+def test_the_goal_set_is_exactly_the_goal_asked_for(asha):
+    asha.post("/api/location", GACHIBOWLI)
+    reply = ask(asha, "set my goal to two thousand six hundred in seven hours on a scooter")
+    assert reply["reply"].startswith("Goal set: Rs 2,600 in 7 hours on a scooter.")
+    m = asha.state()["metrics"]
+    assert (m["target_earnings"], m["remaining_hours"], m["available_hours"]) == (2600, 7.0, 7)
+    assert m["required_pace"] == pytest.approx(2600 / 7, abs=0.1)
+    assert m["progress_pct"] == 0
+
+
+def test_an_unrealistic_goal_is_questioned_not_set(on_shift):
+    before = on_shift.state()["metrics"]
+    reply = ask(on_shift, "set my goal to 200600 in 7 hours")
+    assert "needs Rs 28,621 an hour" in reply["reply"]
+    assert "Nothing was changed" in reply["reply"]
+    assert reply["trace"] == []  # so the page does not act out a change that did not happen
+    assert reply["actions"] == []
+    assert on_shift.state()["metrics"] == before
+
+    reply = ask(on_shift, "no, I meant 2600 in 7 hours")  # a correction replaces it
+    assert reply["reply"].startswith("Goal set: Rs 2,600 in 7 hours")
+    assert on_shift.state()["metrics"]["target_earnings"] == 2600
+    assert ask(on_shift, "yes")["intent"] == "accept"  # "yes" now answers the recommendation
+
+
+def test_an_unrealistic_goal_can_be_confirmed(on_shift):
+    ask(on_shift, "set my goal to 200600 in 7 hours")
+    reply = ask(on_shift, "yes, set it anyway")
+    assert reply["reply"].startswith("Goal set: Rs 200,600 in 7 hours")
+    assert reply["trace"][0]["tool"] == "set_goal"
+    m = on_shift.state()["metrics"]
+    assert (m["target_earnings"], m["remaining_hours"]) == (200600, 7.0)
+    assert on_shift.get("/api/history").json() == []  # the "yes" did not accept a recommendation
+
+
+def test_goal_form_also_asks_before_an_unrealistic_goal(on_shift):
+    res = on_shift.post("/api/goal", {**GOAL, "target_earnings": 200600})
+    assert res.status_code == 409
+    assert res.json()["detail"]["code"] == "confirm_goal"
+    assert on_shift.state()["metrics"]["target_earnings"] == 1000
+    assert on_shift.post("/api/goal", {**GOAL, "target_earnings": 200600, "confirmed": True}).status_code == 200
+    assert on_shift.state()["metrics"]["target_earnings"] == 200600
+
+
+def test_agent_is_told_when_a_change_did_not_happen(on_shift, scripted):
+    seen = scripted(
+        {"steps": [call("set_goal", "c1", target_earnings=200600, available_hours=7)]},
+        model_says("That needs Rs 28,621 an hour. Did you mean Rs 2,600?"),
+        {"steps": [call("set_goal", "c2", target_earnings=200600, available_hours=7, confirmed=True)]},
+        model_says("Done, Rs 2,00,600 it is."),
+    )
+    reply = ask(on_shift, "set my goal to 200600 in 7 hours")
+    result = next(i for i in seen[1] if i["type"] == "function_result")["result"][0]["text"]
+    assert '"changed": false' in result and "28,621 an hour" in result
+    assert reply["trace"] == [{"tool": "set_goal", "ok": False,
+                               "args": {"target_earnings": 200600, "available_hours": 7}}]  # fmt: skip
+    assert on_shift.state()["metrics"]["target_earnings"] == 1000
+
+    reply = ask(on_shift, "yes I mean it")
+    assert reply["trace"][0]["ok"] is True
+    assert on_shift.state()["metrics"]["target_earnings"] == 200600
+
+
+def test_every_instruction_is_recorded(on_shift):
+    ask(on_shift, "set my goal to 2600 in 7 hours")
+    ask(on_shift, "sing me a song")
+    log = main.db.agent_log(1)
+    assert [row["said"] for row in log] == ["sing me a song", "set my goal to 2600 in 7 hours"]
+    assert log[1]["engine"] == "rules" and '"set_goal"' in log[1]["steps"]
+    assert log[1]["reply"].startswith("Goal set: Rs 2,600")
